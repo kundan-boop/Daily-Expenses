@@ -11,6 +11,11 @@ class MainApplication : Application(), ImageLoaderFactory {
 
     override fun onCreate() {
         super.onCreate()
+        try {
+            com.tom_roush.pdfbox.android.PDFBoxResourceLoader.init(this)
+        } catch (e: Exception) {
+            // Ignored if already initialized or not needed
+        }
         DatabaseManager.schedulePeriodicOptimization(this)
     }
 
