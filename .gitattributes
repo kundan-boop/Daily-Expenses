@@ -1,0 +1,12 @@
+# Force Git to treat binary assets as binary to prevent line ending corruption
+*.jar binary
+*.png binary
+*.webp binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.keystore binary
+
+# Ensure gradlew and other scripts always use Unix line endings (LF)
+gradlew text eol=lf
+*.sh text eol=lf

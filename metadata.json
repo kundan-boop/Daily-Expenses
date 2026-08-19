@@ -1,0 +1,6 @@
+{
+  "name": "Daily Expense & Ledger",
+  "description": "Track Expenses, Manage Customers, Stay Organized. A modern digital ledger and credit management app to manage daily credit, debit, expenses, and customer balances.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
