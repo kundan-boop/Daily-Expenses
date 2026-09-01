@@ -1,6 +1,7 @@
 package com.example
 
 import android.content.Context
+import androidx.documentfile.provider.DocumentFile
 import androidx.test.core.app.ApplicationProvider
 import com.example.utils.BackupManager
 import org.junit.Assert.*
@@ -55,7 +56,42 @@ class BackupManagerTest {
         BackupManager.performDailyBackup(context, """{"trigger":true}""")
 
         val remainingFiles = backupDir.listFiles { _, name -> name.startsWith("backup_") && name.endsWith(".json") } ?: emptyArray()
-        assertTrue("Backups should be retained within rolling window (<= 7)", remainingFiles.size <= 7)
+        assertTrue("Backups should be retained within rolling window (<= 2)", remainingFiles.size <= 2)
+    }
+
+    @Test
+    fun testSameDayOverwrite_doesNotDuplicateFiles() {
+        val backupDir = File(context.filesDir, "daily_backups")
+        if (!backupDir.exists()) backupDir.mkdirs()
+
+        // Write first update today
+        BackupManager.performDailyBackup(context, """{"edit":1}""")
+        val countAfterFirst = backupDir.listFiles { _, name -> name.startsWith("backup_") && name.endsWith(".json") }?.size ?: 0
+
+        // Write second update today
+        BackupManager.performDailyBackup(context, """{"edit":2}""")
+        val countAfterSecond = backupDir.listFiles { _, name -> name.startsWith("backup_") && name.endsWith(".json") }?.size ?: 0
+
+        // Write third update today
+        BackupManager.performDailyBackup(context, """{"edit":3}""")
+        val countAfterThird = backupDir.listFiles { _, name -> name.startsWith("backup_") && name.endsWith(".json") }?.size ?: 0
+
+        assertEquals("Same-day updates must overwrite in-place and not create duplicate files", countAfterFirst, countAfterSecond)
+        assertEquals("Same-day updates must overwrite in-place and not create duplicate files", countAfterSecond, countAfterThird)
+    }
+
+    @Test
+    fun testOfflineQueueStateTransitions() {
+        assertFalse("Initially no pending drive backup", BackupManager.hasPendingDriveBackup(context))
+
+        // Set pending when offline change occurs
+        BackupManager.setPendingDriveBackup(context, true)
+        assertTrue("Pending Drive backup should be true", BackupManager.hasPendingDriveBackup(context))
+        assertTrue("isBackupNeededToday should be true when pending Drive backup exists", BackupManager.isBackupNeededToday(context))
+
+        // Cleared once uploaded
+        BackupManager.setPendingDriveBackup(context, false)
+        assertFalse("Pending Drive backup should be cleared", BackupManager.hasPendingDriveBackup(context))
     }
 
     @Test
@@ -82,4 +118,3 @@ class BackupManagerTest {
         assertTrue(BackupManager.isBackupNeededToday(context))
     }
 }
-

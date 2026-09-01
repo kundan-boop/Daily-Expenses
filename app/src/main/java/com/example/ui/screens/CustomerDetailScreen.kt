@@ -1,5 +1,6 @@
 package com.example.ui.screens
 
+import android.app.DatePickerDialog
 import android.content.Intent
 import android.net.Uri
 import android.widget.Toast
@@ -12,8 +13,10 @@ import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.*
 import androidx.compose.material.icons.filled.*
@@ -85,6 +88,7 @@ fun CustomerDetailScreen(
     var showDeleteConfirmDialog by remember { mutableStateOf(false) }
     var selectedTxForDelete by remember { mutableStateOf<TransactionEntity?>(null) }
     var viewingImageUri by remember { mutableStateOf<String?>(null) }
+    var showPdfExportSheet by remember { mutableStateOf(false) }
 
     val txListState = rememberLazyListState()
     val searchTxListState = rememberLazyListState()
@@ -447,29 +451,7 @@ fun CustomerDetailScreen(
                                 ) {
                                     OutlinedButton(
                                         onClick = {
-                                            try {
-                                                val pdfFile = com.example.utils.PdfReportExporter.generateCustomerLedgerPdf(
-                                                    context = context,
-                                                    customerName = customer.name,
-                                                    mobileNumber = if (customer.mobileNumber.isNotBlank()) customer.mobileNumber else null,
-                                                    transactions = transactions
-                                                )
-                                                val pdfUri = androidx.core.content.FileProvider.getUriForFile(
-                                                    context,
-                                                    "${context.packageName}.fileprovider",
-                                                    pdfFile
-                                                )
-                                                val shareIntent = Intent(Intent.ACTION_SEND).apply {
-                                                    type = "application/pdf"
-                                                    putExtra(Intent.EXTRA_STREAM, pdfUri)
-                                                    putExtra(Intent.EXTRA_SUBJECT, "Customer Ledger Report - ${customer.name}")
-                                                    putExtra(Intent.EXTRA_TEXT, "Daily Expense & Ledger – Customer Ledger Report PDF for ${customer.name}")
-                                                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                                                }
-                                                context.startActivity(Intent.createChooser(shareIntent, "Export PDF Report"))
-                                            } catch (e: Exception) {
-                                                Toast.makeText(context, "Error generating PDF: ${e.message}", Toast.LENGTH_SHORT).show()
-                                            }
+                                            showPdfExportSheet = true
                                         },
                                         shape = RoundedCornerShape(8.dp),
                                         contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
@@ -793,6 +775,14 @@ fun CustomerDetailScreen(
             }
         )
     }
+
+    if (showPdfExportSheet) {
+        CustomerPdfExportSheet(
+            customer = customer,
+            transactions = transactions,
+            onDismiss = { showPdfExportSheet = false }
+        )
+    }
 }
 
 @Composable
@@ -946,6 +936,930 @@ fun TransactionItemCard(
                             }
                         }
                     }
+                }
+            }
+        }
+    }
+}
+
+enum class PdfDateFilterMode(val label: String) {
+    ALL("All Dates"),
+    SPECIFIC_MONTH("Month"),
+    DATE_RANGE("Date Range"),
+    SPECIFIC_YEAR("Year")
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun CustomerPdfExportSheet(
+    customer: CustomerEntity,
+    transactions: List<TransactionEntity>,
+    onDismiss: () -> Unit
+) {
+    val context = LocalContext.current
+    val calNow = remember { Calendar.getInstance() }
+
+    var filterMode by remember { mutableStateOf(PdfDateFilterMode.ALL) }
+    var selectedMonth by remember { mutableStateOf(calNow.get(Calendar.MONTH)) }
+    var selectedMonthYear by remember { mutableStateOf(calNow.get(Calendar.YEAR)) }
+    var selectedYearOnly by remember { mutableStateOf(calNow.get(Calendar.YEAR)) }
+
+    var startDateMillis by remember {
+        mutableStateOf(
+            Calendar.getInstance().apply {
+                set(Calendar.HOUR_OF_DAY, 0)
+                set(Calendar.MINUTE, 0)
+                set(Calendar.SECOND, 0)
+                set(Calendar.MILLISECOND, 0)
+            }.timeInMillis
+        )
+    }
+
+    var endDateMillis by remember {
+        mutableStateOf(
+            Calendar.getInstance().apply {
+                set(Calendar.HOUR_OF_DAY, 23)
+                set(Calendar.MINUTE, 59)
+                set(Calendar.SECOND, 59)
+                set(Calendar.MILLISECOND, 999)
+            }.timeInMillis
+        )
+    }
+
+    var selectedPreset by remember { mutableStateOf("Today") }
+
+    val monthNames = remember {
+        listOf(
+            "January", "February", "March", "April", "May", "June",
+            "July", "August", "September", "October", "November", "December"
+        )
+    }
+    val shortMonthNames = remember {
+        listOf("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+    }
+    val availableYears = remember {
+        listOf(2022, 2023, 2024, 2025, 2026, 2027, 2028, 2029, 2030)
+    }
+
+    val sdfDay = remember { SimpleDateFormat("dd MMM yyyy", Locale.getDefault()) }
+
+    // Start Date Picker Dialog
+    val startDatePickerDialog = remember(startDateMillis) {
+        val cal = Calendar.getInstance().apply { timeInMillis = startDateMillis }
+        DatePickerDialog(
+            context,
+            { _, year, month, dayOfMonth ->
+                val newCal = Calendar.getInstance().apply {
+                    set(Calendar.YEAR, year)
+                    set(Calendar.MONTH, month)
+                    set(Calendar.DAY_OF_MONTH, dayOfMonth)
+                    set(Calendar.HOUR_OF_DAY, 0)
+                    set(Calendar.MINUTE, 0)
+                    set(Calendar.SECOND, 0)
+                    set(Calendar.MILLISECOND, 0)
+                }
+                startDateMillis = newCal.timeInMillis
+                if (endDateMillis < startDateMillis) {
+                    endDateMillis = Calendar.getInstance().apply {
+                        timeInMillis = startDateMillis
+                        set(Calendar.HOUR_OF_DAY, 23)
+                        set(Calendar.MINUTE, 59)
+                        set(Calendar.SECOND, 59)
+                        set(Calendar.MILLISECOND, 999)
+                    }.timeInMillis
+                }
+                selectedPreset = "Custom"
+            },
+            cal.get(Calendar.YEAR),
+            cal.get(Calendar.MONTH),
+            cal.get(Calendar.DAY_OF_MONTH)
+        )
+    }
+
+    // End Date Picker Dialog
+    val endDatePickerDialog = remember(endDateMillis) {
+        val cal = Calendar.getInstance().apply { timeInMillis = endDateMillis }
+        DatePickerDialog(
+            context,
+            { _, year, month, dayOfMonth ->
+                val newCal = Calendar.getInstance().apply {
+                    set(Calendar.YEAR, year)
+                    set(Calendar.MONTH, month)
+                    set(Calendar.DAY_OF_MONTH, dayOfMonth)
+                    set(Calendar.HOUR_OF_DAY, 23)
+                    set(Calendar.MINUTE, 59)
+                    set(Calendar.SECOND, 59)
+                    set(Calendar.MILLISECOND, 999)
+                }
+                endDateMillis = newCal.timeInMillis
+                if (startDateMillis > endDateMillis) {
+                    startDateMillis = Calendar.getInstance().apply {
+                        timeInMillis = endDateMillis
+                        set(Calendar.HOUR_OF_DAY, 0)
+                        set(Calendar.MINUTE, 0)
+                        set(Calendar.SECOND, 0)
+                        set(Calendar.MILLISECOND, 0)
+                    }.timeInMillis
+                }
+                selectedPreset = "Custom"
+            },
+            cal.get(Calendar.YEAR),
+            cal.get(Calendar.MONTH),
+            cal.get(Calendar.DAY_OF_MONTH)
+        )
+    }
+
+    // Compute Filtered Transactions & Period Label
+    val (filteredTransactions, periodLabel) = remember(
+        filterMode,
+        selectedMonth,
+        selectedMonthYear,
+        selectedYearOnly,
+        startDateMillis,
+        endDateMillis,
+        transactions
+    ) {
+        when (filterMode) {
+            PdfDateFilterMode.ALL -> {
+                Pair(transactions, "All Available Dates")
+            }
+            PdfDateFilterMode.SPECIFIC_MONTH -> {
+                val startCal = Calendar.getInstance().apply {
+                    set(Calendar.YEAR, selectedMonthYear)
+                    set(Calendar.MONTH, selectedMonth)
+                    set(Calendar.DAY_OF_MONTH, 1)
+                    set(Calendar.HOUR_OF_DAY, 0)
+                    set(Calendar.MINUTE, 0)
+                    set(Calendar.SECOND, 0)
+                    set(Calendar.MILLISECOND, 0)
+                }
+                val endCal = Calendar.getInstance().apply {
+                    set(Calendar.YEAR, selectedMonthYear)
+                    set(Calendar.MONTH, selectedMonth)
+                    set(Calendar.DAY_OF_MONTH, getActualMaximum(Calendar.DAY_OF_MONTH))
+                    set(Calendar.HOUR_OF_DAY, 23)
+                    set(Calendar.MINUTE, 59)
+                    set(Calendar.SECOND, 59)
+                    set(Calendar.MILLISECOND, 999)
+                }
+                val label = "${monthNames[selectedMonth]} $selectedMonthYear"
+                val filtered = transactions.filter { it.dateTimestamp in startCal.timeInMillis..endCal.timeInMillis }
+                Pair(filtered, label)
+            }
+            PdfDateFilterMode.SPECIFIC_YEAR -> {
+                val startCal = Calendar.getInstance().apply {
+                    set(Calendar.YEAR, selectedYearOnly)
+                    set(Calendar.MONTH, 0)
+                    set(Calendar.DAY_OF_MONTH, 1)
+                    set(Calendar.HOUR_OF_DAY, 0)
+                    set(Calendar.MINUTE, 0)
+                    set(Calendar.SECOND, 0)
+                    set(Calendar.MILLISECOND, 0)
+                }
+                val endCal = Calendar.getInstance().apply {
+                    set(Calendar.YEAR, selectedYearOnly)
+                    set(Calendar.MONTH, 11)
+                    set(Calendar.DAY_OF_MONTH, 31)
+                    set(Calendar.HOUR_OF_DAY, 23)
+                    set(Calendar.MINUTE, 59)
+                    set(Calendar.SECOND, 59)
+                    set(Calendar.MILLISECOND, 999)
+                }
+                val label = "Year $selectedYearOnly"
+                val filtered = transactions.filter { it.dateTimestamp in startCal.timeInMillis..endCal.timeInMillis }
+                Pair(filtered, label)
+            }
+            PdfDateFilterMode.DATE_RANGE -> {
+                val startCal = Calendar.getInstance().apply {
+                    timeInMillis = startDateMillis
+                    set(Calendar.HOUR_OF_DAY, 0)
+                    set(Calendar.MINUTE, 0)
+                    set(Calendar.SECOND, 0)
+                    set(Calendar.MILLISECOND, 0)
+                }
+                val endCal = Calendar.getInstance().apply {
+                    timeInMillis = endDateMillis
+                    set(Calendar.HOUR_OF_DAY, 23)
+                    set(Calendar.MINUTE, 59)
+                    set(Calendar.SECOND, 59)
+                    set(Calendar.MILLISECOND, 999)
+                }
+                val isSameDay = sdfDay.format(startCal.time) == sdfDay.format(endCal.time)
+                val label = if (isSameDay) sdfDay.format(startCal.time) else "${sdfDay.format(startCal.time)} – ${sdfDay.format(endCal.time)}"
+                val filtered = transactions.filter { it.dateTimestamp in startCal.timeInMillis..endCal.timeInMillis }
+                Pair(filtered, label)
+            }
+        }
+    }
+
+    val filteredReceived = filteredTransactions.filter { it.transactionType == "I_RECEIVED" }.sumOf { it.amount }
+    val filteredPaid = filteredTransactions.filter { it.transactionType == "I_PAID" }.sumOf { it.amount }
+    val filteredBalance = filteredPaid - filteredReceived
+    val isDeductionCustomer = customer.name.contains("Deduction", ignoreCase = true)
+
+    fun exportPdf() {
+        if (filteredTransactions.isEmpty()) {
+            Toast.makeText(context, "No data available for the selected period", Toast.LENGTH_SHORT).show()
+        }
+        try {
+            val pdfFile = com.example.utils.PdfReportExporter.generateCustomerLedgerPdf(
+                context = context,
+                customerName = customer.name,
+                mobileNumber = if (customer.mobileNumber.isNotBlank()) customer.mobileNumber else null,
+                transactions = filteredTransactions,
+                periodLabel = periodLabel
+            )
+            val pdfUri = androidx.core.content.FileProvider.getUriForFile(
+                context,
+                "${context.packageName}.fileprovider",
+                pdfFile
+            )
+            val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                type = "application/pdf"
+                putExtra(Intent.EXTRA_STREAM, pdfUri)
+                putExtra(Intent.EXTRA_SUBJECT, "Customer Ledger Report ($periodLabel) - ${customer.name}")
+                putExtra(Intent.EXTRA_TEXT, "Daily Expense & Ledger – Customer Report for ${customer.name} ($periodLabel)")
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            context.startActivity(Intent.createChooser(shareIntent, "Export PDF Report"))
+            onDismiss()
+        } catch (e: Exception) {
+            Toast.makeText(context, "Error generating PDF: ${e.message}", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        containerColor = Color.White,
+        scrimColor = Color.Black.copy(alpha = 0.5f)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .widthIn(max = 600.dp)
+                .align(Alignment.CenterHorizontally)
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 16.dp, vertical = 12.dp)
+                .navigationBarsPadding()
+        ) {
+            // Header Row
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column {
+                    Text(
+                        text = "Export Customer PDF Report",
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = Slate900
+                    )
+                    Text(
+                        text = "Choose date, month, year, or export all transactions.",
+                        fontSize = 12.sp,
+                        color = Slate500
+                    )
+                }
+
+                IconButton(
+                    onClick = onDismiss,
+                    modifier = Modifier.size(32.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Close,
+                        contentDescription = "Close",
+                        tint = Slate500,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(14.dp))
+
+            // Filter Mode Selector Chips
+            Text(
+                text = "FILTER BY",
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Bold,
+                color = Slate500,
+                letterSpacing = 0.5.sp
+            )
+
+            Spacer(modifier = Modifier.height(6.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                PdfDateFilterMode.values().forEach { mode ->
+                    val isSelected = filterMode == mode
+                    FilterChip(
+                        selected = isSelected,
+                        onClick = { filterMode = mode },
+                        label = {
+                            Text(
+                                text = mode.label,
+                                fontSize = 11.sp,
+                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
+                            )
+                        },
+                        leadingIcon = {
+                            Icon(
+                                imageVector = when (mode) {
+                                    PdfDateFilterMode.ALL -> Icons.Default.AllInclusive
+                                    PdfDateFilterMode.SPECIFIC_MONTH -> Icons.Default.CalendarMonth
+                                    PdfDateFilterMode.DATE_RANGE -> Icons.Default.DateRange
+                                    PdfDateFilterMode.SPECIFIC_YEAR -> Icons.Default.CalendarToday
+                                },
+                                contentDescription = null,
+                                modifier = Modifier.size(14.dp)
+                            )
+                        },
+                        colors = FilterChipDefaults.filterChipColors(
+                            selectedContainerColor = PrimaryNavy,
+                            selectedLabelColor = Color.White,
+                            selectedLeadingIconColor = Color.White,
+                            containerColor = Slate50,
+                            labelColor = Slate700,
+                            iconColor = Slate500
+                        ),
+                        border = FilterChipDefaults.filterChipBorder(
+                            enabled = true,
+                            selected = isSelected,
+                            borderColor = Slate200,
+                            selectedBorderColor = PrimaryNavy
+                        ),
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            // Dynamic Control Section based on Selected Filter Mode
+            when (filterMode) {
+                PdfDateFilterMode.ALL -> {
+                    Surface(
+                        shape = RoundedCornerShape(10.dp),
+                        color = Slate50,
+                        border = androidx.compose.foundation.BorderStroke(1.dp, Slate200),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Info,
+                                contentDescription = null,
+                                tint = SecondaryBlue,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "Exporting all ${transactions.size} available transactions recorded for ${customer.name}.",
+                                fontSize = 12.sp,
+                                color = Slate700
+                            )
+                        }
+                    }
+                }
+
+                PdfDateFilterMode.SPECIFIC_MONTH -> {
+                    Card(
+                        shape = RoundedCornerShape(12.dp),
+                        colors = CardDefaults.cardColors(containerColor = Slate50),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, Slate200),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(modifier = Modifier.padding(12.dp)) {
+                            // Month & Year Header with Navigation Arrows
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                IconButton(
+                                    onClick = {
+                                        if (selectedMonth == 0) {
+                                            selectedMonth = 11
+                                            selectedMonthYear--
+                                        } else {
+                                            selectedMonth--
+                                        }
+                                    },
+                                    modifier = Modifier.size(28.dp)
+                                ) {
+                                    Icon(Icons.Default.ChevronLeft, contentDescription = "Previous Month", tint = Slate700)
+                                }
+
+                                Text(
+                                    text = "${monthNames[selectedMonth]} $selectedMonthYear",
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Slate900
+                                )
+
+                                IconButton(
+                                    onClick = {
+                                        if (selectedMonth == 11) {
+                                            selectedMonth = 0
+                                            selectedMonthYear++
+                                        } else {
+                                            selectedMonth++
+                                        }
+                                    },
+                                    modifier = Modifier.size(28.dp)
+                                ) {
+                                    Icon(Icons.Default.ChevronRight, contentDescription = "Next Month", tint = Slate700)
+                                }
+                            }
+
+                            Spacer(modifier = Modifier.height(8.dp))
+
+                            // Month Grid (12 chips)
+                            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                for (row in 0 until 3) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                    ) {
+                                        for (col in 0 until 4) {
+                                            val mIdx = row * 4 + col
+                                            val isMonthSelected = selectedMonth == mIdx
+                                            Surface(
+                                                shape = RoundedCornerShape(6.dp),
+                                                color = if (isMonthSelected) SecondaryBlue else Color.White,
+                                                border = androidx.compose.foundation.BorderStroke(
+                                                    1.dp,
+                                                    if (isMonthSelected) SecondaryBlue else Slate200
+                                                ),
+                                                modifier = Modifier
+                                                    .weight(1f)
+                                                    .clickable { selectedMonth = mIdx }
+                                            ) {
+                                                Text(
+                                                    text = shortMonthNames[mIdx],
+                                                    fontSize = 11.sp,
+                                                    fontWeight = if (isMonthSelected) FontWeight.Bold else FontWeight.Medium,
+                                                    color = if (isMonthSelected) Color.White else Slate700,
+                                                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                                                    modifier = Modifier.padding(vertical = 6.dp)
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            Spacer(modifier = Modifier.height(8.dp))
+
+                            // Year Row
+                            LazyRow(
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                items(availableYears) { yr ->
+                                    val isYrSelected = selectedMonthYear == yr
+                                    Surface(
+                                        shape = RoundedCornerShape(6.dp),
+                                        color = if (isYrSelected) Slate900 else Color.White,
+                                        border = androidx.compose.foundation.BorderStroke(
+                                            1.dp,
+                                            if (isYrSelected) Slate900 else Slate200
+                                        ),
+                                        modifier = Modifier.clickable { selectedMonthYear = yr }
+                                    ) {
+                                        Text(
+                                            text = yr.toString(),
+                                            fontSize = 11.sp,
+                                            fontWeight = if (isYrSelected) FontWeight.Bold else FontWeight.Normal,
+                                            color = if (isYrSelected) Color.White else Slate700,
+                                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                PdfDateFilterMode.SPECIFIC_YEAR -> {
+                    Card(
+                        shape = RoundedCornerShape(12.dp),
+                        colors = CardDefaults.cardColors(containerColor = Slate50),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, Slate200),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(modifier = Modifier.padding(12.dp)) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                IconButton(
+                                    onClick = { selectedYearOnly-- },
+                                    modifier = Modifier.size(28.dp)
+                                ) {
+                                    Icon(Icons.Default.ChevronLeft, contentDescription = "Previous Year", tint = Slate700)
+                                }
+
+                                Text(
+                                    text = "Year $selectedYearOnly",
+                                    fontSize = 15.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Slate900
+                                )
+
+                                IconButton(
+                                    onClick = { selectedYearOnly++ },
+                                    modifier = Modifier.size(28.dp)
+                                ) {
+                                    Icon(Icons.Default.ChevronRight, contentDescription = "Next Year", tint = Slate700)
+                                }
+                            }
+
+                            Spacer(modifier = Modifier.height(10.dp))
+
+                            // Year Selection Grid
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                listOf(2023, 2024, 2025, 2026, 2027).forEach { yr ->
+                                    val isYrSelected = selectedYearOnly == yr
+                                    Surface(
+                                        shape = RoundedCornerShape(8.dp),
+                                        color = if (isYrSelected) SecondaryBlue else Color.White,
+                                        border = androidx.compose.foundation.BorderStroke(
+                                            1.dp,
+                                            if (isYrSelected) SecondaryBlue else Slate200
+                                        ),
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .clickable { selectedYearOnly = yr }
+                                    ) {
+                                        Text(
+                                            text = yr.toString(),
+                                            fontSize = 12.sp,
+                                            fontWeight = if (isYrSelected) FontWeight.Bold else FontWeight.Medium,
+                                            color = if (isYrSelected) Color.White else Slate700,
+                                            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                                            modifier = Modifier.padding(vertical = 8.dp)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                PdfDateFilterMode.DATE_RANGE -> {
+                    Card(
+                        shape = RoundedCornerShape(12.dp),
+                        colors = CardDefaults.cardColors(containerColor = Slate50),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, Slate200),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(modifier = Modifier.padding(12.dp)) {
+                            // Quick Preset Chips
+                            Text(
+                                text = "QUICK PRESETS",
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Slate400,
+                                letterSpacing = 0.5.sp
+                            )
+
+                            Spacer(modifier = Modifier.height(6.dp))
+
+                            LazyRow(
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                val presets = listOf("Today", "Yesterday", "Last 7 Days", "Last 30 Days", "This Month")
+                                items(presets) { preset ->
+                                    val isSelected = selectedPreset == preset
+                                    Surface(
+                                        shape = RoundedCornerShape(6.dp),
+                                        color = if (isSelected) SecondaryBlue else Color.White,
+                                        border = androidx.compose.foundation.BorderStroke(
+                                            1.dp,
+                                            if (isSelected) SecondaryBlue else Slate200
+                                        ),
+                                        modifier = Modifier.clickable {
+                                            selectedPreset = preset
+                                            when (preset) {
+                                                "Today" -> {
+                                                    val start = Calendar.getInstance().apply {
+                                                        set(Calendar.HOUR_OF_DAY, 0)
+                                                        set(Calendar.MINUTE, 0)
+                                                        set(Calendar.SECOND, 0)
+                                                        set(Calendar.MILLISECOND, 0)
+                                                    }
+                                                    val end = Calendar.getInstance().apply {
+                                                        set(Calendar.HOUR_OF_DAY, 23)
+                                                        set(Calendar.MINUTE, 59)
+                                                        set(Calendar.SECOND, 59)
+                                                        set(Calendar.MILLISECOND, 999)
+                                                    }
+                                                    startDateMillis = start.timeInMillis
+                                                    endDateMillis = end.timeInMillis
+                                                }
+                                                "Yesterday" -> {
+                                                    val start = Calendar.getInstance().apply {
+                                                        add(Calendar.DAY_OF_YEAR, -1)
+                                                        set(Calendar.HOUR_OF_DAY, 0)
+                                                        set(Calendar.MINUTE, 0)
+                                                        set(Calendar.SECOND, 0)
+                                                        set(Calendar.MILLISECOND, 0)
+                                                    }
+                                                    val end = Calendar.getInstance().apply {
+                                                        add(Calendar.DAY_OF_YEAR, -1)
+                                                        set(Calendar.HOUR_OF_DAY, 23)
+                                                        set(Calendar.MINUTE, 59)
+                                                        set(Calendar.SECOND, 59)
+                                                        set(Calendar.MILLISECOND, 999)
+                                                    }
+                                                    startDateMillis = start.timeInMillis
+                                                    endDateMillis = end.timeInMillis
+                                                }
+                                                "Last 7 Days" -> {
+                                                    val start = Calendar.getInstance().apply {
+                                                        add(Calendar.DAY_OF_YEAR, -6)
+                                                        set(Calendar.HOUR_OF_DAY, 0)
+                                                        set(Calendar.MINUTE, 0)
+                                                        set(Calendar.SECOND, 0)
+                                                        set(Calendar.MILLISECOND, 0)
+                                                    }
+                                                    val end = Calendar.getInstance().apply {
+                                                        set(Calendar.HOUR_OF_DAY, 23)
+                                                        set(Calendar.MINUTE, 59)
+                                                        set(Calendar.SECOND, 59)
+                                                        set(Calendar.MILLISECOND, 999)
+                                                    }
+                                                    startDateMillis = start.timeInMillis
+                                                    endDateMillis = end.timeInMillis
+                                                }
+                                                "Last 30 Days" -> {
+                                                    val start = Calendar.getInstance().apply {
+                                                        add(Calendar.DAY_OF_YEAR, -29)
+                                                        set(Calendar.HOUR_OF_DAY, 0)
+                                                        set(Calendar.MINUTE, 0)
+                                                        set(Calendar.SECOND, 0)
+                                                        set(Calendar.MILLISECOND, 0)
+                                                    }
+                                                    val end = Calendar.getInstance().apply {
+                                                        set(Calendar.HOUR_OF_DAY, 23)
+                                                        set(Calendar.MINUTE, 59)
+                                                        set(Calendar.SECOND, 59)
+                                                        set(Calendar.MILLISECOND, 999)
+                                                    }
+                                                    startDateMillis = start.timeInMillis
+                                                    endDateMillis = end.timeInMillis
+                                                }
+                                                "This Month" -> {
+                                                    val start = Calendar.getInstance().apply {
+                                                        set(Calendar.DAY_OF_MONTH, 1)
+                                                        set(Calendar.HOUR_OF_DAY, 0)
+                                                        set(Calendar.MINUTE, 0)
+                                                        set(Calendar.SECOND, 0)
+                                                        set(Calendar.MILLISECOND, 0)
+                                                    }
+                                                    val end = Calendar.getInstance().apply {
+                                                        set(Calendar.HOUR_OF_DAY, 23)
+                                                        set(Calendar.MINUTE, 59)
+                                                        set(Calendar.SECOND, 59)
+                                                        set(Calendar.MILLISECOND, 999)
+                                                    }
+                                                    startDateMillis = start.timeInMillis
+                                                    endDateMillis = end.timeInMillis
+                                                }
+                                            }
+                                        }
+                                    ) {
+                                        Text(
+                                            text = preset,
+                                            fontSize = 11.sp,
+                                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                                            color = if (isSelected) Color.White else Slate700,
+                                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                                        )
+                                    }
+                                }
+                            }
+
+                            Spacer(modifier = Modifier.height(10.dp))
+
+                            // Start & End Date Pickers
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                // From Date
+                                Surface(
+                                    shape = RoundedCornerShape(8.dp),
+                                    color = Color.White,
+                                    border = androidx.compose.foundation.BorderStroke(1.dp, Slate300),
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .clickable { startDatePickerDialog.show() }
+                                ) {
+                                    Column(modifier = Modifier.padding(10.dp)) {
+                                        Text("From Date", fontSize = 10.sp, color = Slate500, fontWeight = FontWeight.SemiBold)
+                                        Spacer(modifier = Modifier.height(2.dp))
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Icon(Icons.Default.CalendarToday, contentDescription = null, modifier = Modifier.size(13.dp), tint = SecondaryBlue)
+                                            Spacer(modifier = Modifier.width(4.dp))
+                                            Text(
+                                                text = sdfDay.format(Date(startDateMillis)),
+                                                fontSize = 12.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = Slate900
+                                            )
+                                        }
+                                    }
+                                }
+
+                                // To Date
+                                Surface(
+                                    shape = RoundedCornerShape(8.dp),
+                                    color = Color.White,
+                                    border = androidx.compose.foundation.BorderStroke(1.dp, Slate300),
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .clickable { endDatePickerDialog.show() }
+                                ) {
+                                    Column(modifier = Modifier.padding(10.dp)) {
+                                        Text("To Date", fontSize = 10.sp, color = Slate500, fontWeight = FontWeight.SemiBold)
+                                        Spacer(modifier = Modifier.height(2.dp))
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Icon(Icons.Default.CalendarToday, contentDescription = null, modifier = Modifier.size(13.dp), tint = SecondaryBlue)
+                                            Spacer(modifier = Modifier.width(4.dp))
+                                            Text(
+                                                text = sdfDay.format(Date(endDateMillis)),
+                                                fontSize = 12.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = Slate900
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(14.dp))
+
+            // Filter Summary Snapshot Card
+            Card(
+                shape = RoundedCornerShape(12.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = if (filteredTransactions.isEmpty()) Color(0xFFFFFBEB) else Slate50
+                ),
+                border = androidx.compose.foundation.BorderStroke(
+                    1.dp,
+                    if (filteredTransactions.isEmpty()) Color(0xFFFDE68A) else Slate200
+                ),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(modifier = Modifier.padding(12.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "Report Period: $periodLabel",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Slate900
+                        )
+
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            color = if (filteredTransactions.isEmpty()) Color(0xFFFEF3C7) else Slate200
+                        ) {
+                            Text(
+                                text = "${filteredTransactions.size} entries",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = if (filteredTransactions.isEmpty()) Color(0xFFB45309) else Slate700,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
+                            )
+                        }
+                    }
+
+                    if (filteredTransactions.isEmpty()) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                Icons.Default.Info,
+                                contentDescription = null,
+                                tint = Color(0xFFD97706),
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = "No data available for the selected period",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = Color(0xFFB45309)
+                            )
+                        }
+                        Text(
+                            text = "No records exist for $periodLabel. Exporting will generate a clean ledger with a clear \"No data available\" message.",
+                            fontSize = 11.sp,
+                            color = Color(0xFF92400E),
+                            modifier = Modifier.padding(top = 2.dp)
+                        )
+                    } else {
+                        Spacer(modifier = Modifier.height(10.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Column {
+                                Text("Total Received", fontSize = 10.sp, color = Slate500)
+                                Text(
+                                    String.format("₹ %,.2f", filteredReceived),
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = GreenPrimary
+                                )
+                            }
+
+                            Column {
+                                Text("Total Paid", fontSize = 10.sp, color = Slate500)
+                                Text(
+                                    String.format("₹ %,.2f", filteredPaid),
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = RedDebit
+                                )
+                            }
+
+                            Column(horizontalAlignment = Alignment.End) {
+                                Text(
+                                    if (isDeductionCustomer) "Total Expense" else "Net Balance",
+                                    fontSize = 10.sp,
+                                    color = Slate500
+                                )
+                                Text(
+                                    String.format("₹ %,.2f", Math.abs(filteredBalance)),
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (isDeductionCustomer) RedDebit else if (filteredBalance >= 0) GreenPrimary else RedDebit
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(18.dp))
+
+            // Action Buttons
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                OutlinedButton(
+                    onClick = onDismiss,
+                    shape = RoundedCornerShape(10.dp),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, Slate300),
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(46.dp)
+                ) {
+                    Text("Cancel", color = Slate700, fontWeight = FontWeight.SemiBold)
+                }
+
+                Button(
+                    onClick = { exportPdf() },
+                    shape = RoundedCornerShape(10.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = PrimaryNavy),
+                    modifier = Modifier
+                        .weight(2f)
+                        .height(46.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.FileDownload,
+                        contentDescription = null,
+                        modifier = Modifier.size(16.dp),
+                        tint = Color.White
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = if (filteredTransactions.isEmpty()) "Export PDF (0 entries)" else "Export PDF (${filteredTransactions.size})",
+                        fontWeight = FontWeight.Bold,
+                        color = Color.White
+                    )
                 }
             }
         }

@@ -17,6 +17,7 @@ class MainApplication : Application(), ImageLoaderFactory {
             // Ignored if already initialized or not needed
         }
         DatabaseManager.schedulePeriodicOptimization(this)
+        com.example.utils.BackupManager.init(this)
     }
 
     override fun newImageLoader(): ImageLoader {

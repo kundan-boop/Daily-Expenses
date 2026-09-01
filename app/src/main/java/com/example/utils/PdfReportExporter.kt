@@ -22,20 +22,53 @@ object PdfReportExporter {
         var currentLine = StringBuilder()
 
         for (word in words) {
-            val testLine = if (currentLine.isEmpty()) word else "${currentLine} $word"
-            if (paint.measureText(testLine) <= maxWidth) {
-                currentLine.append(if (currentLine.isEmpty()) word else " $word")
-            } else {
+            if (paint.measureText(word) > maxWidth) {
                 if (currentLine.isNotEmpty()) {
                     lines.add(currentLine.toString())
+                    currentLine = StringBuilder()
                 }
-                currentLine = StringBuilder(word)
+                var tempWord = word
+                while (paint.measureText(tempWord) > maxWidth && tempWord.length > 1) {
+                    var cut = tempWord.length - 1
+                    while (cut > 0 && paint.measureText(tempWord.substring(0, cut)) > maxWidth) {
+                        cut--
+                    }
+                    if (cut <= 0) cut = 1
+                    lines.add(tempWord.substring(0, cut))
+                    tempWord = tempWord.substring(cut)
+                }
+                if (tempWord.isNotEmpty()) {
+                    currentLine.append(tempWord)
+                }
+            } else {
+                val testLine = if (currentLine.isEmpty()) word else "$currentLine $word"
+                if (paint.measureText(testLine) <= maxWidth) {
+                    if (currentLine.isNotEmpty()) currentLine.append(" ")
+                    currentLine.append(word)
+                } else {
+                    if (currentLine.isNotEmpty()) {
+                        lines.add(currentLine.toString())
+                    }
+                    currentLine = StringBuilder(word)
+                }
             }
         }
         if (currentLine.isNotEmpty()) {
             lines.add(currentLine.toString())
         }
         return lines.ifEmpty { listOf(text) }
+    }
+
+    private fun calculateCustomerHeaderCardHeight(
+        customerName: String,
+        labelBoldPaint: Paint,
+        isDeductionCustomer: Boolean,
+        hasPeriodLabel: Boolean = true
+    ): Float {
+        val nameLines = wrapText(customerName, labelBoldPaint, 155f)
+        val leftHeight = (nameLines.size * 14f) + (if (hasPeriodLabel) 52f else 38f) + 26f
+        val rightHeight = if (isDeductionCustomer) 54f + 26f else 70f + 26f
+        return Math.max(leftHeight, rightHeight)
     }
 
     private fun loadScaledBitmap(context: Context, pathOrUri: String, maxDim: Int = 800): android.graphics.Bitmap? {
@@ -91,10 +124,18 @@ object PdfReportExporter {
         context: Context,
         customerName: String,
         mobileNumber: String?,
-        transactions: List<TransactionEntity>
+        transactions: List<TransactionEntity>,
+        periodLabel: String = "All Available Dates"
     ): Int {
+        if (transactions.isEmpty()) return 1
         var pageCount = 1
-        var currentY = 215f // Header height on Page 1
+        val isDeductionCustomer = customerName.contains("Deduction", ignoreCase = true)
+        val dummyLabelPaint = Paint().apply {
+            textSize = 10f
+            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+        }
+        val headerCardHeight = calculateCustomerHeaderCardHeight(customerName, dummyLabelPaint, isDeductionCustomer, true)
+        var currentY = 40f + 20f + 15f + headerCardHeight + 15f + 15f // Page 1 initial Y after dynamic header
 
         val commentPaint = Paint().apply {
             textSize = 10f
@@ -124,7 +165,8 @@ object PdfReportExporter {
         context: Context,
         customerName: String,
         mobileNumber: String?,
-        transactions: List<TransactionEntity>
+        transactions: List<TransactionEntity>,
+        periodLabel: String = "All Available Dates"
     ): File {
         val pdfDocument = PdfDocument()
 
@@ -135,7 +177,7 @@ object PdfReportExporter {
         val reportDateStr = SimpleDateFormat("dd/MM/yyyy, hh:mm a", Locale.getDefault()).format(Date())
         val isDeductionCustomer = customerName.contains("Deduction", ignoreCase = true)
 
-        val totalPages = calculateTotalPages(context, customerName, mobileNumber, transactions)
+        val totalPages = calculateTotalPages(context, customerName, mobileNumber, transactions, periodLabel)
 
         var pageNumber = 1
         var pageInfo = PdfDocument.PageInfo.Builder(595, 842, pageNumber).create()
@@ -189,8 +231,9 @@ object PdfReportExporter {
                 canvas.drawLine(36f, currentY, 559f, currentY, paint)
                 currentY += 15f
 
-                // Customer Info Card Box
-                val cardRect = RectF(36f, currentY, 559f, currentY + 115f)
+                // Calculate dynamic Customer Info Card Height based on wrapped name lines
+                val cardHeight = calculateCustomerHeaderCardHeight(customerName, labelBoldPaint, isDeductionCustomer, true)
+                val cardRect = RectF(36f, currentY, 559f, currentY + cardHeight)
                 paint.color = Color.rgb(248, 250, 252) // Slate 50
                 paint.style = Paint.Style.FILL
                 canvas.drawRoundRect(cardRect, 8f, 8f, paint)
@@ -200,33 +243,38 @@ object PdfReportExporter {
                 paint.strokeWidth = 1f
                 canvas.drawRoundRect(cardRect, 8f, 8f, paint)
 
-                // Fill Customer Info
-                var infoY = currentY + 20f
+                // Fill Customer Info - Column 1 (Wraps name and shifts layout down cleanly)
+                var col1Y = currentY + 18f
+                canvas.drawText("Customer Name:", 50f, col1Y, labelBoldPaint)
+                val nameLines = wrapText(customerName, labelBoldPaint, 155f)
+                for ((idx, line) in nameLines.withIndex()) {
+                    canvas.drawText(line, 145f, col1Y + (idx * 14f), labelBoldPaint)
+                }
+                col1Y += (nameLines.size * 14f) + 2f
 
-                // Column 1
-                canvas.drawText("Customer Name:", 50f, infoY, labelBoldPaint)
-                canvas.drawText(customerName, 145f, infoY, labelBoldPaint)
+                canvas.drawText("Mobile Number:", 50f, col1Y, labelBoldPaint)
+                canvas.drawText(if (mobileNumber.isNullOrBlank()) "N/A" else mobileNumber, 145f, col1Y, valuePaint)
 
-                infoY += 18f
-                canvas.drawText("Mobile Number:", 50f, infoY, labelBoldPaint)
-                canvas.drawText(if (mobileNumber.isNullOrBlank()) "N/A" else mobileNumber, 145f, infoY, valuePaint)
+                col1Y += 15f
+                canvas.drawText("Report Period:", 50f, col1Y, labelBoldPaint)
+                canvas.drawText(periodLabel, 145f, col1Y, valuePaint)
 
-                infoY += 18f
-                canvas.drawText("Report Generated:", 50f, infoY, labelBoldPaint)
-                canvas.drawText(reportDateStr, 145f, infoY, valuePaint)
+                col1Y += 15f
+                canvas.drawText("Generated On:", 50f, col1Y, labelBoldPaint)
+                canvas.drawText(reportDateStr, 145f, col1Y, valuePaint)
 
-                // Column 2 (Financial Totals)
-                infoY = currentY + 20f
-                canvas.drawText("Total Received:", 320f, infoY, labelBoldPaint)
-                canvas.drawText(String.format("₹ %,.2f", totalReceived), 420f, infoY, greenPaint)
+                // Column 2 (Financial Totals - Never overlapped by Column 1)
+                var col2Y = currentY + 18f
+                canvas.drawText("Total Received:", 320f, col2Y, labelBoldPaint)
+                canvas.drawText(String.format("₹ %,.2f", totalReceived), 420f, col2Y, greenPaint)
 
-                infoY += 18f
-                canvas.drawText("Total Paid:", 320f, infoY, labelBoldPaint)
-                canvas.drawText(String.format("₹ %,.2f", totalPaid), 420f, infoY, redPaint)
+                col2Y += 16f
+                canvas.drawText("Total Paid:", 320f, col2Y, labelBoldPaint)
+                canvas.drawText(String.format("₹ %,.2f", totalPaid), 420f, col2Y, redPaint)
 
-                infoY += 18f
+                col2Y += 16f
                 val balanceLabel = if (isDeductionCustomer) "Total Expense:" else "Current Balance:"
-                canvas.drawText(balanceLabel, 320f, infoY, labelBoldPaint)
+                canvas.drawText(balanceLabel, 320f, col2Y, labelBoldPaint)
 
                 val balanceValStr = String.format("₹ %,.2f", Math.abs(netBalance))
                 val balancePaint = when {
@@ -235,19 +283,19 @@ object PdfReportExporter {
                     netBalance < -0.01 -> redPaint
                     else -> valuePaint
                 }
-                canvas.drawText(balanceValStr, 420f, infoY, balancePaint)
+                canvas.drawText(balanceValStr, 420f, col2Y, balancePaint)
 
                 if (!isDeductionCustomer) {
-                    infoY += 16f
+                    col2Y += 15f
                     val statusStr = when {
                         netBalance > 0.01 -> "(You'll Get)"
                         netBalance < -0.01 -> "(You'll Give)"
                         else -> "(Settled)"
                     }
-                    canvas.drawText(statusStr, 420f, infoY, valuePaint)
+                    canvas.drawText(statusStr, 420f, col2Y, valuePaint)
                 }
 
-                currentY += 128f
+                currentY += cardHeight + 15f
 
                 // Horizontal Divider separating header from transaction list
                 paint.color = Color.rgb(203, 213, 225)
@@ -297,6 +345,37 @@ object PdfReportExporter {
             color = Color.rgb(51, 65, 85)
             textSize = 10f
             typeface = Typeface.DEFAULT
+        }
+
+        if (transactions.isEmpty()) {
+            val emptyCardHeight = 65f
+            val emptyRect = RectF(36f, currentY, 559f, currentY + emptyCardHeight)
+            paint.style = Paint.Style.FILL
+            paint.color = Color.rgb(254, 243, 199) // Amber 100
+            canvas.drawRoundRect(emptyRect, 8f, 8f, paint)
+
+            paint.style = Paint.Style.STROKE
+            paint.color = Color.rgb(251, 191, 36) // Amber 400
+            paint.strokeWidth = 1f
+            canvas.drawRoundRect(emptyRect, 8f, 8f, paint)
+
+            val emptyPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.rgb(146, 64, 14) // Amber 900
+                textSize = 11f
+                typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+                textAlign = Paint.Align.CENTER
+            }
+            canvas.drawText("No data available for the selected period", 595f / 2f, currentY + 28f, emptyPaint)
+
+            val emptySubPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.rgb(180, 83, 9) // Amber 700
+                textSize = 9.5f
+                typeface = Typeface.DEFAULT
+                textAlign = Paint.Align.CENTER
+            }
+            canvas.drawText("Period: $periodLabel", 595f / 2f, currentY + 46f, emptySubPaint)
+
+            currentY += emptyCardHeight + 15f
         }
 
         for (tx in transactions) {

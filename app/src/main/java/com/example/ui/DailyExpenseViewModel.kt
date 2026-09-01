@@ -63,7 +63,13 @@ class DailyExpenseViewModel(application: Application) : AndroidViewModel(applica
     private val _driveFolderName = MutableStateFlow<String?>(com.example.utils.BackupManager.getDriveFolderName(application))
     val driveFolderName: StateFlow<String?> = _driveFolderName.asStateFlow()
 
+    private val _hasPendingDriveBackup = MutableStateFlow(com.example.utils.BackupManager.hasPendingDriveBackup(application))
+    val hasPendingDriveBackup: StateFlow<Boolean> = _hasPendingDriveBackup.asStateFlow()
+
+    val backupStatus: StateFlow<com.example.utils.DriveBackupStatus> = com.example.utils.BackupManager.backupStatusFlow
+
     fun refreshDailyBackupsList() {
+        com.example.utils.BackupManager.refreshBackupStatus(getApplication())
         val list = com.example.utils.BackupManager.getDailyBackups(getApplication())
         _dailyBackupsList.value = list
         refreshDriveBackupsList()
@@ -71,9 +77,13 @@ class DailyExpenseViewModel(application: Application) : AndroidViewModel(applica
 
     fun refreshDriveBackupsList() {
         _driveFolderName.value = com.example.utils.BackupManager.getDriveFolderName(getApplication())
+        _hasPendingDriveBackup.value = com.example.utils.BackupManager.hasPendingDriveBackup(getApplication())
+        com.example.utils.BackupManager.refreshBackupStatus(getApplication())
         viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
             val list = com.example.utils.BackupManager.getDriveBackups(getApplication())
             _driveBackupsList.value = list
+            _hasPendingDriveBackup.value = com.example.utils.BackupManager.hasPendingDriveBackup(getApplication())
+            com.example.utils.BackupManager.refreshBackupStatus(getApplication())
         }
     }
 
@@ -90,10 +100,55 @@ class DailyExpenseViewModel(application: Application) : AndroidViewModel(applica
     fun triggerDriveAutoBackupNow(onComplete: ((Boolean) -> Unit)? = null) {
         viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
             try {
+                com.example.utils.BackupManager.enqueueDriveBackupWork(getApplication())
+                val isOnline = com.example.utils.BackupManager.isNetworkAvailable(getApplication())
+                if (!isOnline) {
+                    com.example.utils.BackupManager.setPendingDriveBackup(getApplication(), true)
+                    com.example.utils.BackupManager.updateBackupStatus(
+                        getApplication(),
+                        com.example.utils.BackupState.PENDING_OFFLINE,
+                        com.example.utils.BackupManager.getLastDriveBackupTime(getApplication()),
+                        "Offline: backup queued"
+                    )
+                    refreshDriveBackupsList()
+                    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                        onComplete?.invoke(false)
+                    }
+                    return@launch
+                }
+
+                com.example.utils.BackupManager.updateBackupStatus(
+                    getApplication(),
+                    com.example.utils.BackupState.IN_PROGRESS,
+                    com.example.utils.BackupManager.getLastDriveBackupTime(getApplication()),
+                    null
+                )
+
                 val jsonStr = exportAllDataJson()
                 val success = if (jsonStr.isNotBlank()) {
+                    com.example.utils.BackupManager.performDailyBackup(getApplication(), jsonStr)
                     com.example.utils.BackupManager.performDriveAutoBackup(getApplication(), jsonStr)
                 } else false
+
+                if (success) {
+                    val now = System.currentTimeMillis()
+                    com.example.utils.BackupManager.setPendingDriveBackup(getApplication(), false)
+                    com.example.utils.BackupManager.markBackupCompleted(getApplication())
+                    com.example.utils.BackupManager.updateBackupStatus(
+                        getApplication(),
+                        com.example.utils.BackupState.SUCCESS,
+                        now,
+                        null
+                    )
+                } else {
+                    com.example.utils.BackupManager.setPendingDriveBackup(getApplication(), true)
+                    com.example.utils.BackupManager.updateBackupStatus(
+                        getApplication(),
+                        com.example.utils.BackupState.FAILED,
+                        com.example.utils.BackupManager.getLastDriveBackupTime(getApplication()),
+                        "Manual backup upload failed"
+                    )
+                }
                 refreshDriveBackupsList()
                 kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
                     onComplete?.invoke(success)
@@ -540,7 +595,7 @@ class DailyExpenseViewModel(application: Application) : AndroidViewModel(applica
             }
         }
 
-        // Automated Daily Backup Check (7-Day Rolling Cycle)
+        // Automated Daily Backup Check (2-Day Rolling Cycle)
         viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
             kotlinx.coroutines.delay(2000)
             refreshDailyBackupsList()

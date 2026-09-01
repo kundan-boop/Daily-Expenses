@@ -54,6 +54,8 @@ val Slate400 = NavUnselected
 val Slate300 = Color(0xFFCBD5E1)
 val Slate200 = Color(0xFFE2E8F0)
 val Slate100 = Color(0xFFF1F5F9)
+val Slate50 = Color(0xFFF8FAFC)
+val PrimaryNavy = Color(0xFF0F172A)
 
 val DarkBackground = Color(0xFF0F172A)
 val DarkSurface = Color(0xFF1E293B)

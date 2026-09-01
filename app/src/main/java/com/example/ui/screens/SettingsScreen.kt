@@ -222,7 +222,7 @@ fun SettingsScreen(
         authViewModel.suppressAutoLockOnce()
         uri?.let { folderUri ->
             dailyExpenseViewModel?.saveDriveFolderUri(folderUri)
-            Toast.makeText(context, "Google Drive folder selected! Auto-backups on close will keep 1 latest backup file here.", Toast.LENGTH_LONG).show()
+            Toast.makeText(context, "Google Drive connected! Backups are stored in 'DailyExpenseBackups' folder.", Toast.LENGTH_LONG).show()
         }
     }
 
@@ -1174,6 +1174,8 @@ fun SettingsScreen(
             val dailyBackupsList by (dailyExpenseViewModel?.dailyBackupsList?.collectAsState() ?: remember { mutableStateOf(emptyList()) })
             val driveBackupsList by (dailyExpenseViewModel?.driveBackupsList?.collectAsState() ?: remember { mutableStateOf(emptyList()) })
             val driveFolderName by (dailyExpenseViewModel?.driveFolderName?.collectAsState() ?: remember { mutableStateOf(null) })
+            val hasPendingDriveBackup by (dailyExpenseViewModel?.hasPendingDriveBackup?.collectAsState() ?: remember { mutableStateOf(false) })
+            val backupStatus by (dailyExpenseViewModel?.backupStatus?.collectAsState() ?: remember { mutableStateOf(com.example.utils.DriveBackupStatus()) })
 
             LaunchedEffect(Unit) {
                 dailyExpenseViewModel?.refreshDailyBackupsList()
@@ -1190,12 +1192,16 @@ fun SettingsScreen(
                     modifier = Modifier.padding(16.dp),
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    Row(
+                    @OptIn(ExperimentalLayoutApi::class)
+                    FlowRow(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.padding(end = 8.dp)
+                        ) {
                             Icon(Icons.Default.Cloud, contentDescription = null, tint = SecondaryBlue, modifier = Modifier.size(22.dp))
                             Spacer(modifier = Modifier.width(8.dp))
                             Text("Backup & Restore Ledger Data", fontSize = 16.sp, fontWeight = FontWeight.Bold, color = Slate900)
@@ -1203,7 +1209,24 @@ fun SettingsScreen(
 
                         if (driveFolderName != null) {
                             Surface(shape = RoundedCornerShape(50), color = GreenLight) {
-                                Text("DRIVE CONNECTED", fontSize = 9.sp, fontWeight = FontWeight.ExtraBold, color = GreenPrimary, modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp))
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                ) {
+                                    Icon(
+                                        Icons.Default.CheckCircle,
+                                        contentDescription = null,
+                                        tint = GreenPrimary,
+                                        modifier = Modifier.size(12.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text(
+                                        "DRIVE CONNECTED",
+                                        fontSize = 9.sp,
+                                        fontWeight = FontWeight.ExtraBold,
+                                        color = GreenPrimary
+                                    )
+                                }
                             }
                         }
                     }
@@ -1255,7 +1278,7 @@ fun SettingsScreen(
 
                     HorizontalDivider(color = Slate200)
 
-                    // Subsection 2: GOOGLE DRIVE AUTO-BACKUP & 8-DAY ROTATION
+                    // Subsection 2: GOOGLE DRIVE AUTO-BACKUP & 3-DAY ROTATION
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
@@ -1263,12 +1286,12 @@ fun SettingsScreen(
                     ) {
                         Text("GOOGLE DRIVE AUTO-BACKUP", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = SecondaryBlue, letterSpacing = 0.5.sp)
                         Surface(shape = RoundedCornerShape(4.dp), color = Slate100) {
-                            Text("1 LATEST BACKUP", fontSize = 8.sp, fontWeight = FontWeight.ExtraBold, color = SecondaryBlue, modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp))
+                            Text("3-DAY ROTATION", fontSize = 8.sp, fontWeight = FontWeight.ExtraBold, color = SecondaryBlue, modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp))
                         }
                     }
 
                     Text(
-                        "Select a Google Drive folder where auto-backups save on app close whenever data changes. Previous backup files are deleted before uploading so only 1 latest backup file is kept.",
+                        "Automatically triggers a backup to Google Drive immediately after ANY change (add, edit, delete, or new customer). All backups are saved inside the dedicated 'DailyExpenseBackups' folder with 3-day snapshot rotation. If offline, the backup is queued via WorkManager and uploads automatically when reconnected.",
                         fontSize = 11.sp,
                         color = Slate500
                     )
@@ -1289,15 +1312,84 @@ fun SettingsScreen(
                                 Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
                                     Icon(Icons.Default.FolderSpecial, contentDescription = null, tint = SecondaryBlue, modifier = Modifier.size(18.dp))
                                     Spacer(modifier = Modifier.width(6.dp))
-                                    Text(
-                                        driveFolderName ?: "Selected Drive Folder",
-                                        fontSize = 12.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = Slate900
-                                    )
+                                    Column {
+                                        Text(
+                                            driveFolderName ?: "Selected Drive Folder",
+                                            fontSize = 12.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = Slate900
+                                        )
+                                        Text(
+                                            "Target: DailyExpenseBackups/",
+                                            fontSize = 10.sp,
+                                            color = Slate500,
+                                            fontWeight = FontWeight.SemiBold
+                                        )
+                                    }
                                 }
                                 Surface(shape = RoundedCornerShape(4.dp), color = GreenLight) {
                                     Text("ACTIVE", fontSize = 8.sp, fontWeight = FontWeight.ExtraBold, color = GreenPrimary, modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp))
+                                }
+                            }
+
+                            // Live Status Banner
+                            val statusBgColor = when (backupStatus.state) {
+                                com.example.utils.BackupState.SUCCESS -> Color(0xFFF0FDF4)
+                                com.example.utils.BackupState.PENDING_OFFLINE -> Color(0xFFFFFBEB)
+                                com.example.utils.BackupState.FAILED -> Color(0xFFFEF2F2)
+                                com.example.utils.BackupState.IN_PROGRESS -> Color(0xFFEFF6FF)
+                                com.example.utils.BackupState.NOT_CONFIGURED -> Slate100
+                            }
+                            val statusBorderColor = when (backupStatus.state) {
+                                com.example.utils.BackupState.SUCCESS -> Color(0xFFBBF7D0)
+                                com.example.utils.BackupState.PENDING_OFFLINE -> Color(0xFFFDE68A)
+                                com.example.utils.BackupState.FAILED -> Color(0xFFFECACA)
+                                com.example.utils.BackupState.IN_PROGRESS -> Color(0xFFBFDBFE)
+                                com.example.utils.BackupState.NOT_CONFIGURED -> Slate200
+                            }
+                            val statusTextColor = when (backupStatus.state) {
+                                com.example.utils.BackupState.SUCCESS -> Color(0xFF16A34A)
+                                com.example.utils.BackupState.PENDING_OFFLINE -> Color(0xFFD97706)
+                                com.example.utils.BackupState.FAILED -> Color(0xFFDC2626)
+                                com.example.utils.BackupState.IN_PROGRESS -> Color(0xFF2563EB)
+                                com.example.utils.BackupState.NOT_CONFIGURED -> Slate600
+                            }
+
+                            Surface(
+                                shape = RoundedCornerShape(8.dp),
+                                color = statusBgColor,
+                                border = androidx.compose.foundation.BorderStroke(1.dp, statusBorderColor),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp)
+                                ) {
+                                    Icon(
+                                        when (backupStatus.state) {
+                                            com.example.utils.BackupState.SUCCESS -> Icons.Default.CheckCircle
+                                            com.example.utils.BackupState.PENDING_OFFLINE -> Icons.Default.CloudSync
+                                            com.example.utils.BackupState.FAILED -> Icons.Default.ErrorOutline
+                                            com.example.utils.BackupState.IN_PROGRESS -> Icons.Default.Sync
+                                            com.example.utils.BackupState.NOT_CONFIGURED -> Icons.Default.CloudOff
+                                        },
+                                        contentDescription = null,
+                                        tint = statusTextColor,
+                                        modifier = Modifier.size(14.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(
+                                        when (backupStatus.state) {
+                                            com.example.utils.BackupState.SUCCESS -> backupStatus.lastBackupFormatted?.let { "Last synced: $it (Up to date)" } ?: "Auto-backup active & up to date"
+                                            com.example.utils.BackupState.PENDING_OFFLINE -> "Offline queue: Backup queued, will auto-upload when online"
+                                            com.example.utils.BackupState.FAILED -> "Sync failed: ${backupStatus.errorMessage ?: "Retry required"}"
+                                            com.example.utils.BackupState.IN_PROGRESS -> "Uploading backup to DailyExpenseBackups..."
+                                            com.example.utils.BackupState.NOT_CONFIGURED -> "Google Drive not configured"
+                                        },
+                                        fontSize = 10.5.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = statusTextColor
+                                    )
                                 }
                             }
 
@@ -1355,25 +1447,59 @@ fun SettingsScreen(
                             }
                         }
                     } else {
-                        Button(
-                            onClick = {
-                                authViewModel.suppressAutoLockOnce()
-                                selectDriveFolderLauncher.launch(null)
-                            },
-                            colors = ButtonDefaults.buttonColors(containerColor = SecondaryBlue),
-                            modifier = Modifier.fillMaxWidth(),
-                            shape = RoundedCornerShape(10.dp)
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(Slate100, RoundedCornerShape(12.dp))
+                                .padding(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            Icon(Icons.Default.FolderOpen, contentDescription = null, tint = Color.White, modifier = Modifier.size(16.dp))
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text("Select Google Drive Folder", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                            Surface(
+                                shape = RoundedCornerShape(8.dp),
+                                color = Color(0xFFF8FAFC),
+                                border = androidx.compose.foundation.BorderStroke(1.dp, Slate200),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp)
+                                ) {
+                                    Icon(
+                                        Icons.Default.CloudOff,
+                                        contentDescription = null,
+                                        tint = Slate600,
+                                        modifier = Modifier.size(14.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(
+                                        "Google Drive backup not configured",
+                                        fontSize = 10.5.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = Slate600
+                                    )
+                                }
+                            }
+
+                            Button(
+                                onClick = {
+                                    authViewModel.suppressAutoLockOnce()
+                                    selectDriveFolderLauncher.launch(null)
+                                },
+                                colors = ButtonDefaults.buttonColors(containerColor = SecondaryBlue),
+                                modifier = Modifier.fillMaxWidth(),
+                                shape = RoundedCornerShape(8.dp)
+                            ) {
+                                Icon(Icons.Default.FolderOpen, contentDescription = null, tint = Color.White, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("Select Google Drive Folder", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                            }
                         }
                     }
 
                     if (driveBackupsList.isNotEmpty()) {
                         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                            Text("DRIVE FOLDER BACKUPS (MAX 8 DAYS):", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Slate500)
-                            driveBackupsList.take(8).forEach { driveBackup ->
+                            Text("DRIVE FOLDER BACKUPS (3-DAY ROTATION):", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Slate500)
+                            driveBackupsList.take(3).forEach { driveBackup ->
                                 Row(
                                     modifier = Modifier
                                         .fillMaxWidth()
@@ -1413,20 +1539,21 @@ fun SettingsScreen(
 
                     HorizontalDivider(color = Slate200)
 
-                    // Subsection 3: AUTOMATED DAILY BACKUP & FIREBASE SYNC (7-Day Rolling Cycle)
-                    Row(
+                    // Subsection 3: AUTOMATED DAILY BACKUP & FIREBASE SYNC (2-Day Rolling Cycle)
+                    @OptIn(ExperimentalLayoutApi::class)
+                    FlowRow(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
                         Text("AUTOMATED DAILY BACKUP & FIREBASE SYNC", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = GreenPrimary, letterSpacing = 0.5.sp)
                         Surface(shape = RoundedCornerShape(4.dp), color = GreenLight) {
-                            Text("7-DAY ROLLING", fontSize = 8.sp, fontWeight = FontWeight.ExtraBold, color = GreenPrimary, modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp))
+                            Text("2-DAY ROLLING", fontSize = 8.sp, fontWeight = FontWeight.ExtraBold, color = GreenPrimary, modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp))
                         }
                     }
 
                     Text(
-                        "Automatically backs up daily to Firebase. Retains 7 days of rolling backups (on Day 8, Day 1 is overridden).",
+                        "Automatically backs up daily to Firebase. Retains only the last 2 days of rolling backups (on Day 3, older backups are overridden).",
                         fontSize = 11.sp,
                         color = Slate500
                     )
@@ -1453,8 +1580,8 @@ fun SettingsScreen(
 
                     if (dailyBackupsList.isNotEmpty()) {
                         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                            Text("BACKUP HISTORY (MAX 7 DAYS):", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Slate500)
-                            dailyBackupsList.take(7).forEachIndexed { idx, backup ->
+                            Text("BACKUP HISTORY (MAX 2 DAYS):", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Slate500)
+                            dailyBackupsList.take(2).forEachIndexed { idx, backup ->
                                 Row(
                                     modifier = Modifier
                                         .fillMaxWidth()

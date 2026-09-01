@@ -53,6 +53,7 @@ fun DashboardScreen(
     val dashboardSummary by viewModel.dashboardSummary.collectAsState()
     val filteredSummaries by viewModel.filteredCustomerSummaries.collectAsState()
     val searchQuery by viewModel.searchQuery.collectAsState()
+    val backupStatus by viewModel.backupStatus.collectAsState()
     val pagedCustomersFlow = remember(searchQuery) { viewModel.getCustomersPagedFlow(searchQuery) }
     val pagedCustomers = pagedCustomersFlow.collectAsLazyPagingItems()
     val userProfile by authViewModel?.userProfile?.collectAsState() ?: remember { mutableStateOf(null) }
@@ -390,6 +391,24 @@ fun DashboardScreen(
 
                             HorizontalDivider(color = Slate200, thickness = 1.dp)
                         }
+                    }
+
+                    // Prominent Backup Status Widget
+                    // Visible when:
+                    // 1. Drive is NOT connected (NOT_CONFIGURED)
+                    // 2. Drive is offline / backup is pending (PENDING_OFFLINE)
+                    // 3. Backup is currently in progress (IN_PROGRESS)
+                    // 4. Backup attempt failed (FAILED)
+                    // Automatically hidden when Drive is connected and backup is successfully up-to-date (SUCCESS)
+                    if (backupStatus.state != com.example.utils.BackupState.SUCCESS) {
+                        BackupStatusWidget(
+                            backupStatus = backupStatus,
+                            onSyncNow = { viewModel.triggerDriveAutoBackupNow() },
+                            onOpenSettings = onOpenSettings,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 6.dp)
+                        )
                     }
 
                     // Search Bar
@@ -733,4 +752,149 @@ fun CustomerCardItem(
         }
     }
 }
+
+private data class BackupDisplayData(
+    val bgColor: Color,
+    val borderColor: Color,
+    val icon: androidx.compose.ui.graphics.vector.ImageVector,
+    val iconColor: Color,
+    val title: String,
+    val subtitle: String
+)
+
+@Composable
+fun BackupStatusWidget(
+    backupStatus: com.example.utils.DriveBackupStatus,
+    onSyncNow: () -> Unit,
+    onOpenSettings: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val displayData = when (backupStatus.state) {
+        com.example.utils.BackupState.SUCCESS -> {
+            BackupDisplayData(
+                bgColor = Color(0xFFF0FDF4),
+                borderColor = Color(0xFFBBF7D0),
+                icon = Icons.Default.CloudDone,
+                iconColor = Color(0xFF16A34A),
+                title = "Drive Backup: Up to date",
+                subtitle = backupStatus.lastBackupFormatted?.let { "Last synced $it • DailyExpenseBackups" }
+                    ?: "Auto-synced to DailyExpenseBackups"
+            )
+        }
+        com.example.utils.BackupState.PENDING_OFFLINE -> {
+            BackupDisplayData(
+                bgColor = Color(0xFFFFFBEB),
+                borderColor = Color(0xFFFDE68A),
+                icon = Icons.Default.CloudQueue,
+                iconColor = Color(0xFFD97706),
+                title = "Drive Backup Queued (Offline)",
+                subtitle = "Changes saved locally. Will auto-upload when reconnected"
+            )
+        }
+        com.example.utils.BackupState.FAILED -> {
+            BackupDisplayData(
+                bgColor = Color(0xFFFEF2F2),
+                borderColor = Color(0xFFFECACA),
+                icon = Icons.Default.CloudOff,
+                iconColor = Color(0xFFDC2626),
+                title = "Drive Backup Failed",
+                subtitle = "${backupStatus.errorMessage ?: "Upload could not be completed"} • Tap to retry"
+            )
+        }
+        com.example.utils.BackupState.IN_PROGRESS -> {
+            BackupDisplayData(
+                bgColor = Color(0xFFEFF6FF),
+                borderColor = Color(0xFFBFDBFE),
+                icon = Icons.Default.Sync,
+                iconColor = Color(0xFF2563EB),
+                title = "Backing up to Google Drive...",
+                subtitle = "Uploading snapshot to DailyExpenseBackups folder"
+            )
+        }
+        com.example.utils.BackupState.NOT_CONFIGURED -> {
+            BackupDisplayData(
+                bgColor = Color(0xFFF8FAFC),
+                borderColor = Color(0xFFE2E8F0),
+                icon = Icons.Default.CloudUpload,
+                iconColor = Slate500,
+                title = "Google Drive Backup Not Connected",
+                subtitle = "Tap to connect Drive folder for automated cloud backups"
+            )
+        }
+    }
+
+    Surface(
+        color = displayData.bgColor,
+        shape = RoundedCornerShape(12.dp),
+        border = androidx.compose.foundation.BorderStroke(1.dp, displayData.borderColor),
+        modifier = modifier
+            .clip(RoundedCornerShape(12.dp))
+            .clickable {
+                if (backupStatus.state == com.example.utils.BackupState.NOT_CONFIGURED) {
+                    onOpenSettings()
+                } else {
+                    onSyncNow()
+                }
+            }
+            .testTag("backup_status_widget")
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 7.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            if (backupStatus.state == com.example.utils.BackupState.IN_PROGRESS) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(18.dp),
+                    strokeWidth = 2.dp,
+                    color = displayData.iconColor
+                )
+            } else {
+                Icon(
+                    imageVector = displayData.icon,
+                    contentDescription = "Backup Status",
+                    tint = displayData.iconColor,
+                    modifier = Modifier.size(18.dp)
+                )
+            }
+
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = displayData.title,
+                    fontSize = 11.5.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = Slate900,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    text = displayData.subtitle,
+                    fontSize = 10.sp,
+                    color = Slate600,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+
+            if (backupStatus.state == com.example.utils.BackupState.FAILED ||
+                backupStatus.state == com.example.utils.BackupState.PENDING_OFFLINE ||
+                backupStatus.state == com.example.utils.BackupState.SUCCESS) {
+                IconButton(
+                    onClick = onSyncNow,
+                    modifier = Modifier.size(24.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Refresh,
+                        contentDescription = "Sync Now",
+                        tint = displayData.iconColor,
+                        modifier = Modifier.size(15.dp)
+                    )
+                }
+            }
+        }
+    }
+}
+
 

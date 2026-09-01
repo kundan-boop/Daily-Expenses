@@ -12,7 +12,7 @@ class DailyExpenseRepository(private val db: AppDatabase, private val context: C
     val categoryDao = db.categoryDao()
 
     private fun onDataModified() {
-        context?.let { BackupManager.markDataChanged(it) }
+        context?.let { BackupManager.notifyDataChanged(it) }
     }
 
     suspend fun <T> runInTransaction(block: suspend () -> T): T = db.withTransaction { block() }
