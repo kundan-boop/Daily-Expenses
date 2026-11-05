@@ -3,6 +3,7 @@ package com.example.ui.screens
 import com.example.R
 import android.widget.Toast
 import android.content.Intent
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -24,6 +25,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -34,7 +37,7 @@ import com.example.ui.DailyExpenseViewModel
 import com.example.ui.theme.*
 import kotlinx.coroutines.launch
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun SettingsScreen(
     authViewModel: AuthViewModel,
@@ -1739,6 +1742,15 @@ fun SettingsScreen(
         var email by remember { mutableStateOf(userProfile.email) }
         var businessName by remember { mutableStateOf(userProfile.businessName) }
 
+        val keyboardController = LocalSoftwareKeyboardController.current
+        val focusManager = LocalFocusManager.current
+        val isImeVisible = WindowInsets.isImeVisible
+
+        BackHandler(enabled = isImeVisible) {
+            keyboardController?.hide()
+            focusManager.clearFocus()
+        }
+
         AlertDialog(
             onDismissRequest = { showEditProfileDialog = false },
             containerColor = Color.White,
@@ -1747,10 +1759,18 @@ fun SettingsScreen(
             modifier = Modifier
                 .fillMaxWidth()
                 .widthIn(max = 520.dp)
+                .imePadding()
                 .padding(horizontal = 15.dp),
             title = { Text("Edit Profile Details", fontWeight = FontWeight.ExtraBold, color = Slate900) },
             text = {
-                Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                BackHandler(enabled = isImeVisible) {
+                    keyboardController?.hide()
+                    focusManager.clearFocus()
+                }
+                Column(
+                    modifier = Modifier.verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(16.dp)
+                ) {
                     OutlinedTextField(
                         value = name,
                         onValueChange = { name = it },
@@ -1856,6 +1876,15 @@ fun SettingsScreen(
     if (showPinDialog) {
         var pin by remember { mutableStateOf("1234") }
 
+        val keyboardController = LocalSoftwareKeyboardController.current
+        val focusManager = LocalFocusManager.current
+        val isImeVisible = WindowInsets.isImeVisible
+
+        BackHandler(enabled = isImeVisible) {
+            keyboardController?.hide()
+            focusManager.clearFocus()
+        }
+
         AlertDialog(
             onDismissRequest = { showPinDialog = false },
             containerColor = Color.White,
@@ -1864,9 +1893,14 @@ fun SettingsScreen(
             modifier = Modifier
                 .fillMaxWidth()
                 .widthIn(max = 520.dp)
+                .imePadding()
                 .padding(horizontal = 15.dp),
             title = { Text("Set 4-Digit Security PIN", fontWeight = FontWeight.ExtraBold, color = Slate900) },
             text = {
+                BackHandler(enabled = isImeVisible) {
+                    keyboardController?.hide()
+                    focusManager.clearFocus()
+                }
                 Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
                     OutlinedTextField(
                         value = pin,

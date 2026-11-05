@@ -90,6 +90,7 @@ fun MainContainer(
                         viewModel = dailyExpenseViewModel,
                         authViewModel = authViewModel,
                         onCustomerClick = { customer ->
+                            dailyExpenseViewModel.clearCustomerSearchQuery()
                             currentScreen = Screen.CustomerDetail(customer)
                         },
                         onAddCustomerClick = {
@@ -110,7 +111,10 @@ fun MainContainer(
                     CustomerDetailScreen(
                         customer = screen.customer,
                         viewModel = dailyExpenseViewModel,
-                        onBackClick = { currentScreen = Screen.Dashboard },
+                        onBackClick = {
+                            dailyExpenseViewModel.clearTransactionSearchQuery()
+                            currentScreen = Screen.Dashboard
+                        },
                         onAddEntryClick = { type ->
                             activeCustomerIdForEntry = screen.customer.id
                             initialTransactionType = type

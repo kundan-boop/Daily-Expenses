@@ -21,6 +21,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.activity.compose.BackHandler
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
@@ -40,7 +43,7 @@ import com.example.ui.theme.Slate900
 import java.text.SimpleDateFormat
 import java.util.*
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun DashboardScreen(
     viewModel: DailyExpenseViewModel,
@@ -52,11 +55,33 @@ fun DashboardScreen(
 ) {
     val dashboardSummary by viewModel.dashboardSummary.collectAsState()
     val filteredSummaries by viewModel.filteredCustomerSummaries.collectAsState()
-    val searchQuery by viewModel.searchQuery.collectAsState()
+    val searchQuery by viewModel.customerSearchQuery.collectAsState()
     val backupStatus by viewModel.backupStatus.collectAsState()
     val pagedCustomersFlow = remember(searchQuery) { viewModel.getCustomersPagedFlow(searchQuery) }
     val pagedCustomers = pagedCustomersFlow.collectAsLazyPagingItems()
     val userProfile by authViewModel?.userProfile?.collectAsState() ?: remember { mutableStateOf(null) }
+
+    val isImeVisible = WindowInsets.isImeVisible
+    val keyboardController = LocalSoftwareKeyboardController.current
+    val focusManager = LocalFocusManager.current
+
+    // 1. If keyboard is open: first Back closes only the keyboard & clears focus
+    BackHandler(enabled = isImeVisible) {
+        keyboardController?.hide()
+        focusManager.clearFocus()
+    }
+
+    // 2. If keyboard is closed and customer search has text: next Back clears search
+    BackHandler(enabled = !isImeVisible && searchQuery.isNotEmpty()) {
+        viewModel.clearCustomerSearchQuery()
+    }
+
+    // Clear search when leaving Dashboard page so searches never carry over
+    DisposableEffect(Unit) {
+        onDispose {
+            viewModel.clearCustomerSearchQuery()
+        }
+    }
 
     var customerToDelete by remember { mutableStateOf<CustomerEntity?>(null) }
 
@@ -419,12 +444,12 @@ fun DashboardScreen(
                     ) {
                         OutlinedTextField(
                             value = searchQuery,
-                            onValueChange = { viewModel.setSearchQuery(it) },
-                            placeholder = { Text("Search name, phone, comments, amount...", fontSize = 13.sp, color = Slate500) },
+                            onValueChange = { viewModel.setCustomerSearchQuery(it) },
+                            placeholder = { Text("Search customers", fontSize = 13.sp, color = Slate500) },
                             leadingIcon = { Icon(Icons.Default.Search, contentDescription = null, tint = GreenPrimary) },
                             trailingIcon = {
                                 if (searchQuery.isNotEmpty()) {
-                                    IconButton(onClick = { viewModel.setSearchQuery("") }) {
+                                    IconButton(onClick = { viewModel.clearCustomerSearchQuery() }) {
                                         Icon(Icons.Default.Clear, contentDescription = "Clear", tint = Slate700)
                                     }
                                 }

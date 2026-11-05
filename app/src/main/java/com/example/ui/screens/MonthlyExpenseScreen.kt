@@ -1,5 +1,6 @@
 package com.example.ui.screens
 
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -8,9 +9,11 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.*
 import androidx.compose.material.icons.filled.*
@@ -21,6 +24,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
@@ -32,7 +37,7 @@ import com.example.ui.theme.*
 import java.text.SimpleDateFormat
 import java.util.*
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun MonthlyExpenseScreen(
     viewModel: DailyExpenseViewModel
@@ -440,6 +445,15 @@ fun MonthlyExpenseScreen(
             uri?.let { attachmentUri = it.toString() }
         }
 
+        val keyboardController = LocalSoftwareKeyboardController.current
+        val focusManager = LocalFocusManager.current
+        val isImeVisible = WindowInsets.isImeVisible
+
+        BackHandler(enabled = isImeVisible) {
+            keyboardController?.hide()
+            focusManager.clearFocus()
+        }
+
         AlertDialog(
             onDismissRequest = {
                 showAddDialog = false
@@ -450,6 +464,8 @@ fun MonthlyExpenseScreen(
             properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false),
             modifier = Modifier
                 .fillMaxWidth()
+                .widthIn(max = 520.dp)
+                .imePadding()
                 .padding(horizontal = 15.dp),
             title = {
                 Text(
@@ -460,7 +476,14 @@ fun MonthlyExpenseScreen(
                 )
             },
             text = {
-                Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                BackHandler(enabled = isImeVisible) {
+                    keyboardController?.hide()
+                    focusManager.clearFocus()
+                }
+                Column(
+                    modifier = Modifier.verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(16.dp)
+                ) {
                     // Title Field
                     OutlinedTextField(
                         value = title,

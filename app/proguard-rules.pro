@@ -1,21 +1,23 @@
-# Add project specific ProGuard rules here.
-# You can control the set of applied configuration files using the
-# proguardFiles setting in build.gradle.
-#
-# For more details, see
-#   http://developer.android.com/guide/developing/tools/proguard.html
+# ProGuard / R8 Rules for Daily Expense & Ledger
 
-# If your project uses WebView with JS, uncomment the following
-# and specify the fully qualified class name to the JavaScript interface
-# class:
-#-keepclassmembers class fqcn.of.javascript.interface.for.webview {
-#   public *;
-#}
+# Keep all Room entities, DAOs, and database classes
+-keep class * extends androidx.room.RoomDatabase
+-keep @androidx.room.Entity class * { *; }
+-keep @androidx.room.Dao interface * { *; }
+-keep class com.example.data.** { *; }
+-keepclassmembers class * {
+    @androidx.room.PrimaryKey *;
+    @androidx.room.ColumnInfo *;
+}
+-dontwarn androidx.room.paging.**
 
-# Uncomment this to preserve the line number information for
-# debugging stack traces.
-#-keepattributes SourceFile,LineNumberTable
+# Keep Moshi and JSON serialization classes
+-keep class com.example.domain.** { *; }
+-keep class com.example.utils.** { *; }
+-keepclassmembers class * {
+    @com.squareup.moshi.Json *;
+    @com.squareup.moshi.JsonClass *;
+}
 
-# If you keep the line number information, uncomment this to
-# hide the original source file name.
-#-renamesourcefileattribute SourceFile
+# Preserve line numbers for crash debugging
+-keepattributes SourceFile,LineNumberTable

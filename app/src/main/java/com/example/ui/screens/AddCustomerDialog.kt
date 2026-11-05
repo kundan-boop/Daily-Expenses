@@ -26,12 +26,19 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.isImeVisible
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.core.content.ContextCompat
 import com.example.data.CustomerEntity
 import com.example.ui.DailyExpenseViewModel
 import com.example.ui.theme.*
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun AddCustomerDialog(
     customerToEdit: CustomerEntity? = null,
@@ -39,6 +46,16 @@ fun AddCustomerDialog(
     onDismiss: () -> Unit
 ) {
     val context = LocalContext.current
+    val keyboardController = LocalSoftwareKeyboardController.current
+    val focusManager = LocalFocusManager.current
+    val isImeVisible = WindowInsets.isImeVisible
+
+    // Intercept back press when keyboard is open to dismiss only keyboard and keep dialog & typed data
+    BackHandler(enabled = isImeVisible) {
+        keyboardController?.hide()
+        focusManager.clearFocus()
+    }
+
     var name by remember { mutableStateOf(customerToEdit?.name ?: "") }
     var mobileNumber by remember { mutableStateOf(customerToEdit?.mobileNumber ?: "") }
     var address by remember { mutableStateOf(customerToEdit?.address ?: "") }
@@ -112,6 +129,7 @@ fun AddCustomerDialog(
         modifier = Modifier
             .fillMaxWidth()
             .widthIn(max = 520.dp)
+            .imePadding()
             .padding(horizontal = 15.dp),
         title = {
             Text(
@@ -122,6 +140,10 @@ fun AddCustomerDialog(
             )
         },
         text = {
+            BackHandler(enabled = isImeVisible) {
+                keyboardController?.hide()
+                focusManager.clearFocus()
+            }
             Column(
                 modifier = Modifier
                     .fillMaxWidth()

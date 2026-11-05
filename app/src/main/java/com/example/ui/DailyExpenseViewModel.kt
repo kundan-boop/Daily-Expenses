@@ -618,8 +618,25 @@ class DailyExpenseViewModel(application: Application) : AndroidViewModel(applica
         initialValue = emptyList()
     )
 
-    private val _searchQuery = MutableStateFlow("")
-    val searchQuery: StateFlow<String> = _searchQuery.asStateFlow()
+    // 1. Independent Customer List Search State (Customer List page only)
+    private val _customerSearchQuery = MutableStateFlow("")
+    val customerSearchQuery: StateFlow<String> = _customerSearchQuery.asStateFlow()
+    val searchQuery: StateFlow<String> = _customerSearchQuery.asStateFlow() // Backwards compatibility
+
+    @OptIn(kotlinx.coroutines.FlowPreview::class)
+    private val debouncedCustomerSearch = _customerSearchQuery.debounce { q ->
+        if (q.isBlank()) 0L else 250L
+    }
+
+    // 2. Independent Transaction Search State (Customer Details page only)
+    private val _activeCustomerDetailId = MutableStateFlow<Long?>(null)
+    private val _transactionSearchQuery = MutableStateFlow("")
+    val transactionSearchQuery: StateFlow<String> = _transactionSearchQuery.asStateFlow()
+
+    @OptIn(kotlinx.coroutines.FlowPreview::class)
+    private val debouncedTxSearch = _transactionSearchQuery.debounce { q ->
+        if (q.isBlank()) 0L else 250L
+    }
 
     private val _selectedFilter = MutableStateFlow(CustomerFilter.ALL)
     val selectedFilter: StateFlow<CustomerFilter> = _selectedFilter.asStateFlow()
@@ -658,17 +675,19 @@ class DailyExpenseViewModel(application: Application) : AndroidViewModel(applica
 
     val filteredCustomerSummaries: StateFlow<List<CustomerBalanceSummary>> = combine(
         customerSummaries,
-        _searchQuery,
+        debouncedCustomerSearch,
         _selectedFilter
     ) { summaries, query, filter ->
+        val cleanQuery = query.trim()
         summaries.filter { summary ->
-            val cleanQuery = query.trim()
+            // Customer search: Matches against customer fields only (name, mobileNumber, address, email, notes).
+            // Strictly does not search inside transactions (amount, comment, category, payment mode, etc.).
             val matchesQuery = cleanQuery.isBlank() ||
                     summary.customer.name.contains(cleanQuery, ignoreCase = true) ||
                     summary.customer.mobileNumber.contains(cleanQuery, ignoreCase = true) ||
-                    summary.transactionComments.any { it.contains(cleanQuery, ignoreCase = true) } ||
-                    summary.transactionAmounts.any { it.toString().contains(cleanQuery) } ||
-                    summary.netBalance.toString().contains(cleanQuery)
+                    summary.customer.address.contains(cleanQuery, ignoreCase = true) ||
+                    summary.customer.email.contains(cleanQuery, ignoreCase = true) ||
+                    summary.customer.notes.contains(cleanQuery, ignoreCase = true)
 
             val matchesFilter = when (filter) {
                 CustomerFilter.ALL -> true
@@ -740,8 +759,66 @@ class DailyExpenseViewModel(application: Application) : AndroidViewModel(applica
         initialValue = emptyList()
     )
 
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    val filteredCustomerTransactions: StateFlow<List<TransactionEntity>> = combine(
+        _activeCustomerDetailId.flatMapLatest { custId ->
+            if (custId != null) repository.getTransactionsForCustomer(custId) else flowOf(emptyList())
+        },
+        debouncedTxSearch
+    ) { txList, query ->
+        val clean = query.trim().lowercase()
+        if (clean.isBlank()) {
+            txList
+        } else {
+            val sdf = SimpleDateFormat("dd MMM yyyy, hh:mm a", Locale.getDefault())
+            txList.filter { tx ->
+                // Transaction search: Searches only transactions of the active customer.
+                // Matches against amount, comment, category, payment mode, date, and status.
+                val commentMatches = tx.comment.lowercase().contains(clean)
+                val categoryMatches = tx.category.lowercase().contains(clean)
+                val modeMatches = tx.paymentMode.lowercase().contains(clean)
+                val statusMatches = tx.status.lowercase().contains(clean)
+                val typeMatches = if (clean == "paid" || clean == "gave") tx.transactionType == "I_PAID"
+                                  else if (clean == "received" || clean == "got") tx.transactionType == "I_RECEIVED"
+                                  else false
+                val amountMatches = tx.amount.toString().contains(clean) ||
+                        String.format(Locale.US, "%.2f", tx.amount).contains(clean) ||
+                        String.format(Locale.US, "%.0f", tx.amount).contains(clean)
+                val dateStr = sdf.format(Date(tx.dateTimestamp)).lowercase()
+                val dateMatches = dateStr.contains(clean)
+
+                commentMatches || categoryMatches || modeMatches || statusMatches || amountMatches || dateMatches || typeMatches
+            }
+        }
+    }.stateIn(
+        scope = viewModelScope,
+        started = SharingStarted.WhileSubscribed(5000),
+        initialValue = emptyList()
+    )
+
+    fun setCustomerSearchQuery(query: String) {
+        _customerSearchQuery.value = query
+    }
+
+    fun clearCustomerSearchQuery() {
+        _customerSearchQuery.value = ""
+    }
+
     fun setSearchQuery(query: String) {
-        _searchQuery.value = query
+        setCustomerSearchQuery(query)
+    }
+
+    fun setTransactionSearchQuery(query: String) {
+        _transactionSearchQuery.value = query
+    }
+
+    fun clearTransactionSearchQuery() {
+        _transactionSearchQuery.value = ""
+    }
+
+    fun setActiveCustomerDetailId(customerId: Long?) {
+        _activeCustomerDetailId.value = customerId
+        _transactionSearchQuery.value = "" // Always start with empty search when entering/re-entering
     }
 
     fun getCustomersPagedFlow(query: String = ""): Flow<PagingData<CustomerEntity>> {

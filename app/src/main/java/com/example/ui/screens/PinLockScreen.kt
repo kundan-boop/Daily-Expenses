@@ -29,11 +29,15 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.activity.compose.BackHandler
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.fragment.app.FragmentActivity
 import com.example.ui.AuthViewModel
 import com.example.ui.theme.*
 import com.example.utils.BiometricAuthManager
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun PinLockScreen(
     authViewModel: AuthViewModel,
@@ -336,8 +340,20 @@ fun PinLockScreen(
             }
         }
 
+        val keyboardController = LocalSoftwareKeyboardController.current
+        val focusManager = LocalFocusManager.current
+        val isImeVisible = WindowInsets.isImeVisible
+
+        BackHandler(enabled = isImeVisible) {
+            keyboardController?.hide()
+            focusManager.clearFocus()
+        }
+
         AlertDialog(
             onDismissRequest = { showForgotDialog = false },
+            modifier = Modifier
+                .imePadding()
+                .padding(horizontal = 15.dp),
             title = {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Icon(Icons.Default.Shield, contentDescription = null, tint = GreenPrimary)
@@ -350,6 +366,10 @@ fun PinLockScreen(
                 }
             },
             text = {
+                BackHandler(enabled = isImeVisible) {
+                    keyboardController?.hide()
+                    focusManager.clearFocus()
+                }
                 Column {
                     if (!isOtpVerified) {
                         Text(

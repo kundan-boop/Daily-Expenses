@@ -17,8 +17,10 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.activity.compose.BackHandler
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
@@ -32,7 +34,7 @@ import com.example.ui.theme.*
 import com.example.utils.PdfFormatType
 import java.util.Locale
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun PdfImportPreviewDialog(
     previewItems: List<PdfPreviewItem>,
@@ -51,6 +53,13 @@ fun PdfImportPreviewDialog(
 
     var selectedFileIndex by remember { mutableIntStateOf(0) }
     val focusManager = LocalFocusManager.current
+    val keyboardController = LocalSoftwareKeyboardController.current
+    val isImeVisible = WindowInsets.isImeVisible
+
+    BackHandler(enabled = isImeVisible) {
+        keyboardController?.hide()
+        focusManager.clearFocus()
+    }
 
     val currentItem = previewItems.getOrNull(selectedFileIndex) ?: previewItems.first()
 
@@ -62,6 +71,11 @@ fun PdfImportPreviewDialog(
             dismissOnClickOutside = false
         )
     ) {
+        BackHandler(enabled = isImeVisible) {
+            keyboardController?.hide()
+            focusManager.clearFocus()
+        }
+
         Box(
             modifier = Modifier.fillMaxSize(),
             contentAlignment = Alignment.Center
@@ -70,6 +84,7 @@ fun PdfImportPreviewDialog(
                 modifier = Modifier
                     .fillMaxSize()
                     .widthIn(max = 820.dp)
+                    .imePadding()
                     .padding(12.dp),
                 shape = RoundedCornerShape(20.dp),
                 color = Color.White,

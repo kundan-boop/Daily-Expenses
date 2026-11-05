@@ -30,13 +30,16 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
+import androidx.activity.compose.BackHandler
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import com.example.data.TransactionEntity
 import com.example.ui.DailyExpenseViewModel
 import com.example.ui.theme.*
 import java.text.SimpleDateFormat
 import java.util.*
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun AddTransactionSheet(
     customerId: Long,
@@ -46,6 +49,16 @@ fun AddTransactionSheet(
     onDismiss: () -> Unit
 ) {
     val context = LocalContext.current
+    val keyboardController = LocalSoftwareKeyboardController.current
+    val focusManager = LocalFocusManager.current
+    val isImeVisible = WindowInsets.isImeVisible
+
+    // Intercept back press when keyboard is open to dismiss only the keyboard and keep typed data
+    BackHandler(enabled = isImeVisible) {
+        keyboardController?.hide()
+        focusManager.clearFocus()
+    }
+
     var transactionType by remember(transactionToEdit) {
         mutableStateOf(transactionToEdit?.transactionType ?: initialType)
     }
@@ -113,14 +126,20 @@ fun AddTransactionSheet(
         containerColor = Color.White,
         scrimColor = Color.Black.copy(alpha = 0.5f)
     ) {
+        BackHandler(enabled = isImeVisible) {
+            keyboardController?.hide()
+            focusManager.clearFocus()
+        }
+
         Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .widthIn(max = 600.dp)
                 .align(Alignment.CenterHorizontally)
+                .imePadding()
+                .navigationBarsPadding()
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = 15.dp, vertical = 16.dp)
-                .navigationBarsPadding()
         ) {
             // Header Row
             Row(

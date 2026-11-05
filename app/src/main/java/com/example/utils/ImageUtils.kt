@@ -227,6 +227,10 @@ object ImageUtils {
     }
 
     fun cleanOrphanedImages(context: Context, activePaths: Set<String>) {
+        if (activePaths.isEmpty()) {
+            // Guard: Never delete attachments or photos if active list is empty to prevent any accidental deletion
+            return
+        }
         try {
             val attachmentsDir = File(context.filesDir, "attachments")
             val photosDir = File(context.filesDir, "profile_photos")

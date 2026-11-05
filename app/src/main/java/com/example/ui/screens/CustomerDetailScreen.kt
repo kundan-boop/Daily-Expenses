@@ -22,6 +22,9 @@ import androidx.compose.material.icons.automirrored.filled.*
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.activity.compose.BackHandler
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.nestedscroll.nestedScroll
@@ -41,7 +44,7 @@ import com.example.ui.theme.*
 import java.text.SimpleDateFormat
 import java.util.*
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun CustomerDetailScreen(
     customer: CustomerEntity,
@@ -58,31 +61,66 @@ fun CustomerDetailScreen(
     val pagedTransactionsFlow = remember(customer.id) { viewModel.getTransactionsForCustomerPagedFlow(customer.id) }
     val pagedTransactions = pagedTransactionsFlow.collectAsLazyPagingItems()
 
+    // Independent Transaction Search State & Debounced Results from ViewModel
+    val searchQuery by viewModel.transactionSearchQuery.collectAsState()
+    val filteredTransactions by viewModel.filteredCustomerTransactions.collectAsState()
+    var isSearchVisible by remember { mutableStateOf(false) }
+
+    // Set active customer in ViewModel for transaction search and clear on exit
+    DisposableEffect(customer.id) {
+        viewModel.setActiveCustomerDetailId(customer.id)
+        onDispose {
+            viewModel.clearTransactionSearchQuery()
+            viewModel.setActiveCustomerDetailId(null)
+        }
+    }
+
+    val isImeVisible = WindowInsets.isImeVisible
+    val keyboardController = LocalSoftwareKeyboardController.current
+    val focusManager = LocalFocusManager.current
+
+    // 1. Keyboard-first Back behavior: closes only the keyboard & clears focus if keyboard is open
+    BackHandler(enabled = isImeVisible) {
+        keyboardController?.hide()
+        focusManager.clearFocus()
+    }
+
+    // 2. Next Back clears search text and closes search bar if open
+    BackHandler(enabled = !isImeVisible && (isSearchVisible || searchQuery.isNotEmpty())) {
+        isSearchVisible = false
+        viewModel.clearTransactionSearchQuery()
+    }
+
+    // 3. Next Back navigates back to Customer List if search is closed
+    BackHandler(enabled = !isImeVisible && !isSearchVisible && searchQuery.isEmpty()) {
+        onBackClick()
+    }
+
     val totalPaid = transactions.filter { it.transactionType == "I_PAID" }.sumOf { it.amount }
     val totalReceived = transactions.filter { it.transactionType == "I_RECEIVED" }.sumOf { it.amount }
     val netBalance = totalPaid - totalReceived // Positive = YOU GET, Negative = YOU GIVE
 
-    val sdf = remember { SimpleDateFormat("dd MMM yyyy, hh:mm a", Locale.getDefault()) }
-
-    var searchQuery by remember { mutableStateOf("") }
-    var isSearchVisible by remember { mutableStateOf(false) }
-
-    val filteredTransactions = remember(transactions, searchQuery) {
-        if (searchQuery.isBlank()) {
-            transactions
-        } else {
-            val q = searchQuery.trim().lowercase()
-            transactions.filter { tx ->
-                val commentMatches = tx.comment.lowercase().contains(q)
-                val categoryMatches = tx.category.lowercase().contains(q)
-                val modeMatches = tx.paymentMode.lowercase().contains(q)
-                val amountMatches = tx.amount.toString().contains(q) || String.format(Locale.US, "%.2f", tx.amount).contains(q)
-                val dateStr = sdf.format(Date(tx.dateTimestamp)).lowercase()
-                val dateMatches = dateStr.contains(q)
-                commentMatches || categoryMatches || modeMatches || amountMatches || dateMatches
+    // Cumulative balance calculated chronologically (oldest to newest: dateTimestamp ASC, id ASC)
+    val runningTotalsByTxId by remember(transactions) {
+        derivedStateOf {
+            val sorted = transactions.sortedWith(
+                compareBy<TransactionEntity> { it.dateTimestamp }.thenBy { it.id }
+            )
+            val map = HashMap<Long, Double>(sorted.size)
+            var currentBalance = 0.0
+            for (tx in sorted) {
+                if (tx.transactionType == "I_PAID") {
+                    currentBalance += tx.amount
+                } else {
+                    currentBalance -= tx.amount
+                }
+                map[tx.id] = currentBalance
             }
+            map
         }
     }
+
+    val sdf = remember { SimpleDateFormat("dd MMM yyyy, hh:mm a", Locale.getDefault()) }
 
     var showDeleteCustomerDialog by remember { mutableStateOf(false) }
     var showDeleteConfirmDialog by remember { mutableStateOf(false) }
@@ -524,7 +562,7 @@ fun CustomerDetailScreen(
                             onClick = {
                                 isSearchVisible = !isSearchVisible
                                 if (!isSearchVisible) {
-                                    searchQuery = ""
+                                    viewModel.clearTransactionSearchQuery()
                                 }
                             },
                             modifier = Modifier.size(32.dp)
@@ -541,14 +579,14 @@ fun CustomerDetailScreen(
                     if (isSearchVisible) {
                         OutlinedTextField(
                             value = searchQuery,
-                            onValueChange = { searchQuery = it },
-                            placeholder = { Text("Search by amount, date, or note...", fontSize = 12.sp, color = Slate400) },
+                            onValueChange = { viewModel.setTransactionSearchQuery(it) },
+                            placeholder = { Text("Search transactions", fontSize = 12.sp, color = Slate400) },
                             leadingIcon = {
                                 Icon(Icons.Default.Search, contentDescription = null, tint = Slate400, modifier = Modifier.size(18.dp))
                             },
                             trailingIcon = {
                                 if (searchQuery.isNotEmpty()) {
-                                    IconButton(onClick = { searchQuery = "" }) {
+                                    IconButton(onClick = { viewModel.clearTransactionSearchQuery() }) {
                                         Icon(Icons.Default.Close, contentDescription = "Clear search", tint = Slate400, modifier = Modifier.size(18.dp))
                                     }
                                 }
@@ -605,7 +643,7 @@ fun CustomerDetailScreen(
                             modifier = Modifier.size(48.dp)
                         )
                         Spacer(modifier = Modifier.height(8.dp))
-                        Text("No matching transactions", fontWeight = FontWeight.SemiBold, color = Slate700)
+                        Text("No transactions found", fontWeight = FontWeight.SemiBold, color = Slate700)
                         Text("No entry found for '$searchQuery'", fontSize = 12.sp, color = Slate500)
                     }
                 }
@@ -624,6 +662,7 @@ fun CustomerDetailScreen(
                     ) { tx ->
                         TransactionItemCard(
                             transaction = tx,
+                            runningTotal = runningTotalsByTxId[tx.id],
                             sdf = sdf,
                             onEdit = { onEditEntryClick(tx) },
                             onDelete = {
@@ -651,6 +690,7 @@ fun CustomerDetailScreen(
                         if (tx != null) {
                             TransactionItemCard(
                                 transaction = tx,
+                                runningTotal = runningTotalsByTxId[tx.id],
                                 sdf = sdf,
                                 onEdit = { onEditEntryClick(tx) },
                                 onDelete = {
@@ -788,6 +828,7 @@ fun CustomerDetailScreen(
 @Composable
 fun TransactionItemCard(
     transaction: TransactionEntity,
+    runningTotal: Double? = null,
     sdf: SimpleDateFormat,
     onEdit: () -> Unit,
     onDelete: () -> Unit,
@@ -935,6 +976,34 @@ fun TransactionItemCard(
                                 }
                             }
                         }
+                    }
+                }
+
+                // Small, muted running total at bottom-right of each entry card
+                if (runningTotal != null) {
+                    Spacer(modifier = Modifier.height(3.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.End,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        val formattedAmount = if (Math.abs(runningTotal) % 1.0 == 0.0) {
+                            String.format(Locale.US, "₹%,.0f", Math.abs(runningTotal))
+                        } else {
+                            String.format(Locale.US, "₹%,.2f", Math.abs(runningTotal))
+                        }
+                        val totalDisplay = when {
+                            runningTotal > 0.009 -> "Total: $formattedAmount"
+                            runningTotal < -0.009 -> "Total: -$formattedAmount"
+                            else -> "Total: ₹0"
+                        }
+
+                        Text(
+                            text = totalDisplay,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = Slate500
+                        )
                     }
                 }
             }
@@ -1199,9 +1268,10 @@ fun CustomerPdfExportSheet(
                 .fillMaxWidth()
                 .widthIn(max = 600.dp)
                 .align(Alignment.CenterHorizontally)
+                .imePadding()
+                .navigationBarsPadding()
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = 16.dp, vertical = 12.dp)
-                .navigationBarsPadding()
         ) {
             // Header Row
             Row(
