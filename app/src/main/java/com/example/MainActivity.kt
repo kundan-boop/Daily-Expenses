@@ -6,16 +6,24 @@ import androidx.fragment.app.FragmentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.Surface
+import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalView
+import androidx.core.view.WindowCompat
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ProcessLifecycleOwner
 import com.example.ui.AuthViewModel
 import com.example.ui.screens.MainContainer
 import com.example.ui.theme.DailyExpenseTheme
+import com.example.utils.AppPreferencesManager
 import com.example.utils.BackupManager
+import com.example.utils.ThemeMode
 import com.google.firebase.FirebaseApp
 
 class MainActivity : FragmentActivity() {
@@ -42,7 +50,22 @@ class MainActivity : FragmentActivity() {
 
         enableEdgeToEdge()
         setContent {
-            DailyExpenseTheme {
+            val themeMode by AppPreferencesManager.themeModeFlow.collectAsState()
+            val systemDark = isSystemInDarkTheme()
+            val useDarkTheme = when (themeMode) {
+                ThemeMode.SYSTEM -> systemDark
+                ThemeMode.DARK -> true
+                ThemeMode.LIGHT -> false
+            }
+            val view = LocalView.current
+            if (!view.isInEditMode) {
+                SideEffect {
+                    val controller = WindowCompat.getInsetsController(window, view)
+                    controller.isAppearanceLightStatusBars = false
+                    controller.isAppearanceLightNavigationBars = !useDarkTheme
+                }
+            }
+            DailyExpenseTheme(darkTheme = useDarkTheme) {
                 Surface(modifier = Modifier.fillMaxSize()) {
                     MainContainer(authViewModel = authViewModel)
                 }

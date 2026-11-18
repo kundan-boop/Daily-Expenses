@@ -28,9 +28,11 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.R
 import com.example.ui.AuthViewModel
 import com.example.ui.theme.*
+import com.example.utils.LocalAppStrings
 
 @Composable
 fun AuthScreen(
@@ -39,8 +41,10 @@ fun AuthScreen(
 ) {
     val context = LocalContext.current
     val activity = context as? Activity
+    val c = LedgerTheme.colors
+    val s = LocalAppStrings.current
 
-    val authUiState by authViewModel.authUiState.collectAsState()
+    val authUiState by authViewModel.authUiState.collectAsStateWithLifecycle()
 
     var mobileNumber by remember { mutableStateOf("9876543210") }
     var countryCode by remember { mutableStateOf("+91") }
@@ -60,10 +64,11 @@ fun AuthScreen(
             .fillMaxSize()
             .background(
                 Brush.verticalGradient(
-                    colors = listOf(
-                        Color(0xFF2E7D32),
-                        Color(0xFF1B5E20)
-                    )
+                    colors = if (c.isDark) {
+                        listOf(c.brandHeader, c.background)
+                    } else {
+                        listOf(Color(0xFF2E7D32), Color(0xFF1B5E20))
+                    }
                 )
             )
             .statusBarsPadding()
@@ -88,7 +93,7 @@ fun AuthScreen(
         ) {
             Card(
                 shape = RoundedCornerShape(16.dp),
-                colors = CardDefaults.cardColors(containerColor = Color.White),
+                colors = CardDefaults.cardColors(containerColor = c.card),
                 elevation = CardDefaults.cardElevation(defaultElevation = 10.dp),
                 modifier = Modifier.fillMaxWidth()
             ) {
@@ -98,23 +103,23 @@ fun AuthScreen(
                 ) {
                     Surface(
                         shape = RoundedCornerShape(10.dp),
-                        color = GreenLight,
+                        color = c.greenTint,
                         modifier = Modifier.size(42.dp)
                     ) {
                         Box(contentAlignment = Alignment.Center) {
-                            Icon(Icons.Default.Sms, contentDescription = null, tint = GreenPrimary)
+                            Icon(Icons.Default.Sms, contentDescription = null, tint = c.greenPrimary)
                         }
                     }
 
                     Spacer(modifier = Modifier.width(12.dp))
 
                     Column(modifier = Modifier.weight(1f)) {
-                        Text("📩 Real-Time SMS Received", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = GreenPrimary)
+                        Text("Real-Time SMS Received", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = c.greenPrimary)
                         Text(
                             "OTP Code: ${authUiState.simulatedOtp}",
                             fontSize = 14.sp,
                             fontWeight = FontWeight.ExtraBold,
-                            color = Slate900
+                            color = c.textPrimary
                         )
                     }
 
@@ -122,7 +127,7 @@ fun AuthScreen(
                         onClick = { authViewModel.dismissSmsBanner() },
                         modifier = Modifier.size(28.dp)
                     ) {
-                        Icon(Icons.Default.Close, contentDescription = "Close", tint = Slate500, modifier = Modifier.size(16.dp))
+                        Icon(Icons.Default.Close, contentDescription = s.close, tint = c.textMuted, modifier = Modifier.size(16.dp))
                     }
                 }
             }
@@ -147,14 +152,14 @@ fun AuthScreen(
                 // App Branding Logo
             Card(
                 shape = RoundedCornerShape(16.dp),
-                colors = CardDefaults.cardColors(containerColor = Color.White),
+                colors = CardDefaults.cardColors(containerColor = c.card),
                 elevation = CardDefaults.cardElevation(defaultElevation = 8.dp),
                 modifier = Modifier.size(90.dp)
             ) {
                 Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Image(
                         painter = painterResource(id = R.drawable.img_app_icon_1784889509457),
-                        contentDescription = "Daily Expense & Ledger Icon",
+                        contentDescription = s.appName,
                         modifier = Modifier
                             .size(76.dp)
                             .clip(RoundedCornerShape(8.dp)),
@@ -166,10 +171,11 @@ fun AuthScreen(
             Spacer(modifier = Modifier.height(16.dp))
 
             Text(
-                text = "Daily Expense & Ledger",
+                text = s.appName,
                 fontSize = 28.sp,
                 fontWeight = FontWeight.Bold,
-                color = Color.White
+                color = Color.White,
+                textAlign = TextAlign.Center
             )
 
             Text(
@@ -185,7 +191,7 @@ fun AuthScreen(
             // Auth Card
             Card(
                 shape = RoundedCornerShape(24.dp),
-                colors = CardDefaults.cardColors(containerColor = Color.White),
+                colors = CardDefaults.cardColors(containerColor = c.card),
                 elevation = CardDefaults.cardElevation(defaultElevation = 12.dp),
                 modifier = Modifier.fillMaxWidth()
             ) {
@@ -198,7 +204,7 @@ fun AuthScreen(
                         text = if (!authUiState.isOtpSent) "Mobile Number Login" else "Verify OTP Code",
                         fontSize = 18.sp,
                         fontWeight = FontWeight.ExtraBold,
-                        color = Slate900
+                        color = c.textPrimary
                     )
 
                     Spacer(modifier = Modifier.height(16.dp))
@@ -212,7 +218,7 @@ fun AuthScreen(
                             // Country Code Dropdown/Prefix
                             Surface(
                                 shape = RoundedCornerShape(12.dp),
-                                color = SurfaceBackground,
+                                color = c.surfaceSubtle,
                                 modifier = Modifier
                                     .height(56.dp)
                                     .padding(end = 8.dp)
@@ -225,7 +231,7 @@ fun AuthScreen(
                                         text = countryCode,
                                         fontWeight = FontWeight.ExtraBold,
                                         fontSize = 15.sp,
-                                        color = Slate900
+                                        color = c.textPrimary
                                     )
                                 }
                             }
@@ -233,18 +239,18 @@ fun AuthScreen(
                             OutlinedTextField(
                                 value = mobileNumber,
                                 onValueChange = { mobileNumber = it },
-                                label = { Text("Mobile Number", color = Slate700) },
-                                leadingIcon = { Icon(Icons.Default.Phone, contentDescription = null, tint = GreenPrimary) },
+                                label = { Text("Mobile Number", color = c.textSecondary) },
+                                leadingIcon = { Icon(Icons.Default.Phone, contentDescription = null, tint = c.greenPrimary) },
                                 singleLine = true,
                                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
-                                textStyle = LocalTextStyle.current.copy(color = Slate900, fontSize = 15.sp, fontWeight = FontWeight.SemiBold),
+                                textStyle = LocalTextStyle.current.copy(color = c.textPrimary, fontSize = 15.sp, fontWeight = FontWeight.SemiBold),
                                 colors = OutlinedTextFieldDefaults.colors(
-                                    focusedBorderColor = GreenPrimary,
-                                    unfocusedBorderColor = Slate400,
-                                    focusedTextColor = Slate900,
-                                    unfocusedTextColor = Slate900,
-                                    focusedContainerColor = SurfaceBackground,
-                                    unfocusedContainerColor = SurfaceBackground
+                                    focusedBorderColor = c.greenPrimary,
+                                    unfocusedBorderColor = c.borderStrong,
+                                    focusedTextColor = c.textPrimary,
+                                    unfocusedTextColor = c.textPrimary,
+                                    focusedContainerColor = c.surfaceSubtle,
+                                    unfocusedContainerColor = c.surfaceSubtle
                                 ),
                                 modifier = Modifier
                                     .weight(1f)
@@ -258,7 +264,7 @@ fun AuthScreen(
                             Text(
                                 text = authUiState.errorMessage!!,
                                 fontSize = 12.sp,
-                                color = RedDebit,
+                                color = c.redDebit,
                                 fontWeight = FontWeight.Bold
                             )
                         }
@@ -270,7 +276,7 @@ fun AuthScreen(
                                 authViewModel.sendOtp("$countryCode$mobileNumber", activity)
                             },
                             enabled = !authUiState.isLoading,
-                            colors = ButtonDefaults.buttonColors(containerColor = GreenPrimary),
+                            colors = ButtonDefaults.buttonColors(containerColor = c.greenPrimary),
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .height(50.dp)
@@ -290,26 +296,26 @@ fun AuthScreen(
                         Text(
                             text = "SMS code sent to $countryCode $mobileNumber",
                             fontSize = 12.sp,
-                            color = Slate500,
+                            color = c.textMuted,
                             modifier = Modifier.padding(bottom = 12.dp)
                         )
 
                         OutlinedTextField(
                             value = otpCode,
                             onValueChange = { otpCode = it },
-                            label = { Text("Enter OTP Code", color = Slate700) },
-                            leadingIcon = { Icon(Icons.Default.Lock, contentDescription = null, tint = GreenPrimary) },
+                            label = { Text("Enter OTP Code", color = c.textSecondary) },
+                            leadingIcon = { Icon(Icons.Default.Lock, contentDescription = null, tint = c.greenPrimary) },
                             singleLine = true,
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                            textStyle = LocalTextStyle.current.copy(color = Slate900, fontSize = 18.sp, fontWeight = FontWeight.ExtraBold, letterSpacing = 2.sp),
+                            textStyle = LocalTextStyle.current.copy(color = c.textPrimary, fontSize = 18.sp, fontWeight = FontWeight.ExtraBold, letterSpacing = 2.sp),
                             isError = authUiState.errorMessage != null,
                             colors = OutlinedTextFieldDefaults.colors(
-                                focusedBorderColor = GreenPrimary,
-                                unfocusedBorderColor = Slate400,
-                                focusedTextColor = Slate900,
-                                unfocusedTextColor = Slate900,
-                                focusedContainerColor = SurfaceBackground,
-                                unfocusedContainerColor = SurfaceBackground
+                                focusedBorderColor = c.greenPrimary,
+                                unfocusedBorderColor = c.borderStrong,
+                                focusedTextColor = c.textPrimary,
+                                unfocusedTextColor = c.textPrimary,
+                                focusedContainerColor = c.surfaceSubtle,
+                                unfocusedContainerColor = c.surfaceSubtle
                             ),
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -322,7 +328,7 @@ fun AuthScreen(
                             Text(
                                 text = authUiState.errorMessage!!,
                                 fontSize = 12.sp,
-                                color = RedDebit,
+                                color = c.redDebit,
                                 fontWeight = FontWeight.Bold
                             )
                         }
@@ -334,7 +340,7 @@ fun AuthScreen(
                                 authViewModel.verifyOtp("$countryCode$mobileNumber", otpCode, onLoginSuccess)
                             },
                             enabled = !authUiState.isLoading,
-                            colors = ButtonDefaults.buttonColors(containerColor = GreenPrimary),
+                            colors = ButtonDefaults.buttonColors(containerColor = c.greenPrimary),
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .height(50.dp)
@@ -368,7 +374,7 @@ fun AuthScreen(
                             ) {
                                 Text(
                                     text = if (authUiState.canResend) "Resend OTP" else "Resend in ${authUiState.countdownSeconds}s",
-                                    color = if (authUiState.canResend) GreenPrimary else Slate400,
+                                    color = if (authUiState.canResend) c.greenPrimary else c.textMuted,
                                     fontWeight = FontWeight.Bold,
                                     fontSize = 13.sp
                                 )
@@ -380,7 +386,7 @@ fun AuthScreen(
                                     otpCode = ""
                                 }
                             ) {
-                                Text("Change Number", color = Slate700, fontWeight = FontWeight.Medium, fontSize = 13.sp)
+                                Text("Change Number", color = c.textSecondary, fontWeight = FontWeight.Medium, fontSize = 13.sp)
                             }
                         }
                     }

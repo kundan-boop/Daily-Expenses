@@ -33,9 +33,16 @@ import coil.compose.AsyncImage
 import androidx.activity.compose.BackHandler
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.platform.LocalView
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import com.example.data.TransactionEntity
 import com.example.ui.DailyExpenseViewModel
 import com.example.ui.theme.*
+import com.example.utils.LocalAppStrings
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.*
 
@@ -49,15 +56,8 @@ fun AddTransactionSheet(
     onDismiss: () -> Unit
 ) {
     val context = LocalContext.current
-    val keyboardController = LocalSoftwareKeyboardController.current
-    val focusManager = LocalFocusManager.current
-    val isImeVisible = WindowInsets.isImeVisible
-
-    // Intercept back press when keyboard is open to dismiss only the keyboard and keep typed data
-    BackHandler(enabled = isImeVisible) {
-        keyboardController?.hide()
-        focusManager.clearFocus()
-    }
+    val c = LedgerTheme.colors
+    val s = LocalAppStrings.current
 
     var transactionType by remember(transactionToEdit) {
         mutableStateOf(transactionToEdit?.transactionType ?: initialType)
@@ -78,12 +78,8 @@ fun AddTransactionSheet(
     var selectedCategory by remember(transactionToEdit) {
         mutableStateOf(transactionToEdit?.category ?: "General")
     }
-    var selectedDate by remember(transactionToEdit) {
-        mutableStateOf(Calendar.getInstance().apply {
-            if (transactionToEdit != null) {
-                timeInMillis = transactionToEdit.dateTimestamp
-            }
-        })
+    var selectedDateMillis by remember(transactionToEdit) {
+        mutableLongStateOf(transactionToEdit?.dateTimestamp ?: System.currentTimeMillis())
     }
 
     // Multiple Attachment URIs handled as list, stored as pipe-separated string
@@ -94,6 +90,8 @@ fun AddTransactionSheet(
     }
 
     var attemptedSave by remember { mutableStateOf(false) }
+    var isSaving by remember { mutableStateOf(false) }
+    val coroutineScope = rememberCoroutineScope()
     val isAmountError = attemptedSave && (amountText.toDoubleOrNull() == null || amountText.toDoubleOrNull()!! <= 0)
     val sdf = remember { SimpleDateFormat("dd MMM yyyy", Locale.getDefault()) }
 
@@ -108,27 +106,86 @@ fun AddTransactionSheet(
     }
 
     // Date Picker Dialog
-    val datePickerDialog = DatePickerDialog(
-        context,
-        { _, year, month, dayOfMonth ->
-            selectedDate.set(Calendar.YEAR, year)
-            selectedDate.set(Calendar.MONTH, month)
-            selectedDate.set(Calendar.DAY_OF_MONTH, dayOfMonth)
-        },
-        selectedDate.get(Calendar.YEAR),
-        selectedDate.get(Calendar.MONTH),
-        selectedDate.get(Calendar.DAY_OF_MONTH)
+    val datePickerDialog = remember(selectedDateMillis) {
+        val cal = Calendar.getInstance().apply { timeInMillis = selectedDateMillis }
+        DatePickerDialog(
+            context,
+            { _, year, month, dayOfMonth ->
+                val updated = Calendar.getInstance().apply {
+                    timeInMillis = selectedDateMillis
+                    set(Calendar.YEAR, year)
+                    set(Calendar.MONTH, month)
+                    set(Calendar.DAY_OF_MONTH, dayOfMonth)
+                }
+                selectedDateMillis = updated.timeInMillis
+            },
+            cal.get(Calendar.YEAR),
+            cal.get(Calendar.MONTH),
+            cal.get(Calendar.DAY_OF_MONTH)
+        )
+    }
+
+    var isSheetImeVisible by remember { mutableStateOf(false) }
+    var lastSheetImeCloseTime by remember { mutableLongStateOf(0L) }
+    var currentDialogView by remember { mutableStateOf<android.view.View?>(null) }
+    val sheetState = rememberModalBottomSheetState(
+        skipPartiallyExpanded = true,
+        confirmValueChange = { targetValue ->
+            if (targetValue == SheetValue.Hidden) {
+                val liveIme = isSheetImeVisible || (currentDialogView?.let {
+                    ViewCompat.getRootWindowInsets(it)?.isVisible(WindowInsetsCompat.Type.ime())
+                } == true)
+                // Block swipe/scrim hide if keyboard is open or just closed
+                !liveIme && (System.currentTimeMillis() - lastSheetImeCloseTime > 300L)
+            } else {
+                true
+            }
+        }
     )
 
     ModalBottomSheet(
-        onDismissRequest = onDismiss,
-        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-        containerColor = Color.White,
+        onDismissRequest = {
+            val liveIme = isSheetImeVisible || (currentDialogView?.let {
+                ViewCompat.getRootWindowInsets(it)?.isVisible(WindowInsetsCompat.Type.ime())
+            } == true)
+            if (!liveIme && System.currentTimeMillis() - lastSheetImeCloseTime > 300L) {
+                onDismiss()
+            }
+        },
+        sheetState = sheetState,
+        properties = ModalBottomSheetProperties(shouldDismissOnBackPress = false),
+        containerColor = c.card,
         scrimColor = Color.Black.copy(alpha = 0.5f)
     ) {
-        BackHandler(enabled = isImeVisible) {
-            keyboardController?.hide()
-            focusManager.clearFocus()
+        val dialogView = LocalView.current
+        val imeVisibleInDialog = WindowInsets.isImeVisible
+        val sheetKeyboardController = LocalSoftwareKeyboardController.current
+        val sheetFocusManager = LocalFocusManager.current
+
+        LaunchedEffect(dialogView) {
+            currentDialogView = dialogView
+        }
+        LaunchedEffect(imeVisibleInDialog) {
+            if (isSheetImeVisible && !imeVisibleInDialog) {
+                lastSheetImeCloseTime = System.currentTimeMillis()
+            }
+            isSheetImeVisible = imeVisibleInDialog
+        }
+
+        // Keyboard-first Back handling inside ModalBottomSheet:
+        // 1st Back when IME is open hides keyboard only (preserving popup & typed data).
+        // Next Back when IME is already closed dismisses the popup.
+        BackHandler(enabled = true) {
+            val liveIme = imeVisibleInDialog ||
+                (ViewCompat.getRootWindowInsets(dialogView)?.isVisible(WindowInsetsCompat.Type.ime()) == true)
+            if (liveIme) {
+                lastSheetImeCloseTime = System.currentTimeMillis()
+                sheetKeyboardController?.hide()
+                sheetFocusManager.clearFocus()
+            } else if (System.currentTimeMillis() - lastSheetImeCloseTime > 300L) {
+                sheetFocusManager.clearFocus()
+                onDismiss()
+            }
         }
 
         Column(
@@ -151,14 +208,14 @@ fun AddTransactionSheet(
                     text = if (transactionToEdit == null) "Add Transaction Entry" else "Edit Transaction Entry",
                     fontSize = 20.sp,
                     fontWeight = FontWeight.ExtraBold,
-                    color = Slate900
+                    color = c.textPrimary
                 )
 
                 IconButton(
                     onClick = onDismiss,
                     modifier = Modifier.size(36.dp)
                 ) {
-                    Icon(Icons.Default.Close, contentDescription = "Close", tint = Slate700)
+                    Icon(Icons.Default.Close, contentDescription = s.close, tint = c.textSecondary)
                 }
             }
 
@@ -172,8 +229,8 @@ fun AddTransactionSheet(
                 Button(
                     onClick = { transactionType = "I_PAID" },
                     colors = ButtonDefaults.buttonColors(
-                        containerColor = if (transactionType == "I_PAID") RedDebit else RedLight,
-                        contentColor = if (transactionType == "I_PAID") Color.White else RedDebit
+                        containerColor = if (transactionType == "I_PAID") c.redDebit else c.redTint,
+                        contentColor = if (transactionType == "I_PAID") Color.White else c.redDebit
                     ),
                     shape = RoundedCornerShape(12.dp),
                     modifier = Modifier
@@ -181,7 +238,7 @@ fun AddTransactionSheet(
                         .height(44.dp)
                 ) {
                     Text(
-                        "I PAID (GAVE ₹)",
+                        s.iPaidGave,
                         fontSize = 12.sp,
                         fontWeight = FontWeight.ExtraBold,
                         maxLines = 1
@@ -191,8 +248,8 @@ fun AddTransactionSheet(
                 Button(
                     onClick = { transactionType = "I_RECEIVED" },
                     colors = ButtonDefaults.buttonColors(
-                        containerColor = if (transactionType == "I_RECEIVED") GreenPrimary else GreenLight,
-                        contentColor = if (transactionType == "I_RECEIVED") Color.White else GreenPrimary
+                        containerColor = if (transactionType == "I_RECEIVED") c.greenPrimary else c.greenTint,
+                        contentColor = if (transactionType == "I_RECEIVED") Color.White else c.greenPrimary
                     ),
                     shape = RoundedCornerShape(12.dp),
                     modifier = Modifier
@@ -200,7 +257,7 @@ fun AddTransactionSheet(
                         .height(44.dp)
                 ) {
                     Text(
-                        "I RECEIVED (GOT ₹)",
+                        s.iReceivedGot,
                         fontSize = 12.sp,
                         fontWeight = FontWeight.ExtraBold,
                         maxLines = 1
@@ -214,15 +271,15 @@ fun AddTransactionSheet(
             OutlinedTextField(
                 value = amountText,
                 onValueChange = { amountText = it },
-                label = { Text("Amount (₹) *", color = if (isAmountError) RedDebit else Slate700, fontWeight = FontWeight.Bold) },
-                placeholder = { Text("0", color = Slate400, fontSize = 26.sp, fontWeight = FontWeight.Bold) },
+                label = { Text("Amount (₹) *", color = if (isAmountError) c.redDebit else c.textSecondary, fontWeight = FontWeight.Bold) },
+                placeholder = { Text("0", color = c.textMuted, fontSize = 26.sp, fontWeight = FontWeight.Bold) },
                 isError = isAmountError,
                 prefix = {
                     Text(
                         "₹ ",
                         fontSize = 26.sp,
                         fontWeight = FontWeight.ExtraBold,
-                        color = if (transactionType == "I_PAID") RedDebit else GreenPrimary
+                        color = if (transactionType == "I_PAID") c.redDebit else c.greenPrimary
                     )
                 },
                 singleLine = true,
@@ -230,16 +287,16 @@ fun AddTransactionSheet(
                 textStyle = LocalTextStyle.current.copy(
                     fontSize = 26.sp,
                     fontWeight = FontWeight.ExtraBold,
-                    color = if (transactionType == "I_PAID") RedDebit else GreenPrimary
+                    color = if (transactionType == "I_PAID") c.redDebit else c.greenPrimary
                 ),
                 colors = OutlinedTextFieldDefaults.colors(
-                    focusedBorderColor = if (transactionType == "I_PAID") RedDebit else GreenPrimary,
-                    unfocusedBorderColor = Slate400,
-                    errorBorderColor = RedDebit,
-                    focusedTextColor = if (transactionType == "I_PAID") RedDebit else GreenPrimary,
-                    unfocusedTextColor = if (transactionType == "I_PAID") RedDebit else GreenPrimary,
-                    focusedContainerColor = SurfaceBackground,
-                    unfocusedContainerColor = SurfaceBackground
+                    focusedBorderColor = if (transactionType == "I_PAID") c.redDebit else c.greenPrimary,
+                    unfocusedBorderColor = c.borderStrong,
+                    errorBorderColor = c.redDebit,
+                    focusedTextColor = if (transactionType == "I_PAID") c.redDebit else c.greenPrimary,
+                    unfocusedTextColor = if (transactionType == "I_PAID") c.redDebit else c.greenPrimary,
+                    focusedContainerColor = c.surfaceSubtle,
+                    unfocusedContainerColor = c.surfaceSubtle
                 ),
                 modifier = Modifier
                     .fillMaxWidth()
@@ -261,14 +318,15 @@ fun AddTransactionSheet(
                         .weight(1f)
                         .height(48.dp),
                     shape = RoundedCornerShape(12.dp),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, c.borderStrong),
                     colors = ButtonDefaults.outlinedButtonColors(
-                        containerColor = SurfaceBackground,
-                        contentColor = Slate900
+                        containerColor = c.surfaceSubtle,
+                        contentColor = c.textPrimary
                     )
                 ) {
-                    Icon(Icons.Default.CalendarToday, contentDescription = null, modifier = Modifier.size(18.dp), tint = SecondaryBlue)
+                    Icon(Icons.Default.CalendarToday, contentDescription = null, modifier = Modifier.size(18.dp), tint = c.blueAccent)
                     Spacer(modifier = Modifier.width(6.dp))
-                    Text(sdf.format(selectedDate.time), fontSize = 13.sp, color = Slate900, fontWeight = FontWeight.Bold)
+                    Text(sdf.format(Date(selectedDateMillis)), fontSize = 13.sp, color = c.textPrimary, fontWeight = FontWeight.Bold)
                 }
 
                 // Payment Mode Selector (Default "None")
@@ -280,23 +338,24 @@ fun AddTransactionSheet(
                             .fillMaxWidth()
                             .height(48.dp),
                         shape = RoundedCornerShape(12.dp),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, c.borderStrong),
                         colors = ButtonDefaults.outlinedButtonColors(
-                            containerColor = SurfaceBackground,
-                            contentColor = Slate900
+                            containerColor = c.surfaceSubtle,
+                            contentColor = c.textPrimary
                         )
                     ) {
-                        Text("Mode: $paymentMode", fontSize = 13.sp, color = Slate900, fontWeight = FontWeight.Bold)
-                        Icon(Icons.Default.ArrowDropDown, contentDescription = null, tint = Slate700)
+                        Text("Mode: $paymentMode", fontSize = 13.sp, color = c.textPrimary, fontWeight = FontWeight.Bold)
+                        Icon(Icons.Default.ArrowDropDown, contentDescription = null, tint = c.textSecondary)
                     }
 
                     DropdownMenu(
                         expanded = expandedMode,
                         onDismissRequest = { expandedMode = false },
-                        modifier = Modifier.background(Color.White)
+                        modifier = Modifier.background(c.card)
                     ) {
                         listOf("None", "CASH", "PhonePe", "Paytm", "GPay", "UPI", "BANK", "CARD").forEach { mode ->
                             DropdownMenuItem(
-                                text = { Text(mode, color = Slate900, fontWeight = FontWeight.Bold) },
+                                text = { Text(mode, color = c.textPrimary, fontWeight = FontWeight.Bold) },
                                 onClick = {
                                     paymentMode = mode
                                     expandedMode = false
@@ -313,16 +372,16 @@ fun AddTransactionSheet(
             OutlinedTextField(
                 value = commentText,
                 onValueChange = { commentText = it },
-                label = { Text("Comment / Bill Description", color = Slate700, fontWeight = FontWeight.Medium) },
-                placeholder = { Text("e.g. Grocery items, Bill #104", color = Slate400) },
-                textStyle = LocalTextStyle.current.copy(color = Slate900, fontSize = 14.sp),
+                label = { Text("Comment / Bill Description", color = c.textSecondary, fontWeight = FontWeight.Medium) },
+                placeholder = { Text("e.g. Grocery items, Bill #104", color = c.textMuted) },
+                textStyle = LocalTextStyle.current.copy(color = c.textPrimary, fontSize = 14.sp),
                 colors = OutlinedTextFieldDefaults.colors(
-                    focusedBorderColor = GreenPrimary,
-                    unfocusedBorderColor = Slate400,
-                    focusedTextColor = Slate900,
-                    unfocusedTextColor = Slate900,
-                    focusedContainerColor = SurfaceBackground,
-                    unfocusedContainerColor = SurfaceBackground
+                    focusedBorderColor = c.greenPrimary,
+                    unfocusedBorderColor = c.borderStrong,
+                    focusedTextColor = c.textPrimary,
+                    unfocusedTextColor = c.textPrimary,
+                    focusedContainerColor = c.surfaceSubtle,
+                    unfocusedContainerColor = c.surfaceSubtle
                 ),
                 modifier = Modifier
                     .fillMaxWidth()
@@ -339,12 +398,12 @@ fun AddTransactionSheet(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text("Attach Bill Photos / Receipts (${attachmentUris.size})", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = Slate900)
+                    Text("Attach Bill Photos / Receipts (${attachmentUris.size})", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = c.textPrimary)
 
                     TextButton(onClick = { multiPhotoPickerLauncher.launch("image/*") }) {
-                        Icon(Icons.Default.AddAPhoto, contentDescription = null, modifier = Modifier.size(16.dp), tint = SecondaryBlue)
+                        Icon(Icons.Default.AddAPhoto, contentDescription = null, modifier = Modifier.size(16.dp), tint = c.blueAccent)
                         Spacer(modifier = Modifier.width(4.dp))
-                        Text("Add Photos", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = SecondaryBlue)
+                        Text("Add Photos", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = c.blueAccent)
                     }
                 }
 
@@ -358,7 +417,7 @@ fun AddTransactionSheet(
                                 modifier = Modifier
                                     .size(70.dp)
                                     .clip(RoundedCornerShape(10.dp))
-                                    .background(Slate200)
+                                    .background(c.cardElevated)
                             ) {
                                 AsyncImage(
                                     model = uriStr,
@@ -378,7 +437,7 @@ fun AddTransactionSheet(
                                 ) {
                                     Icon(
                                         imageVector = Icons.Default.Close,
-                                        contentDescription = "Remove",
+                                        contentDescription = s.remove,
                                         tint = Color.White,
                                         modifier = Modifier.size(14.dp)
                                     )
@@ -392,45 +451,79 @@ fun AddTransactionSheet(
             Spacer(modifier = Modifier.height(20.dp))
 
             // Save Entry Button
-            val permanentUris = attachmentUris.map { uriStr ->
-                com.example.utils.ImageUtils.compressAndSaveImage(context, uriStr, "attachments") ?: uriStr
-            }
-            val joinedAttachmentPath = if (permanentUris.isNotEmpty()) permanentUris.joinToString("|") else null
-
             Button(
+                enabled = !isSaving,
                 onClick = {
                     attemptedSave = true
                     val amount = amountText.toDoubleOrNull() ?: 0.0
                     if (amount > 0) {
-                        if (transactionToEdit == null) {
-                            viewModel.addTransaction(
-                                customerId = customerId,
-                                transactionType = transactionType,
-                                amount = amount,
-                                comment = commentText,
-                                category = selectedCategory,
-                                paymentMode = paymentMode,
-                                dateTimestamp = selectedDate.timeInMillis,
-                                attachmentPath = joinedAttachmentPath
-                            )
-                        } else {
-                            viewModel.updateTransaction(
-                                transactionToEdit.copy(
+                        isSaving = true
+                        coroutineScope.launch {
+                            val joinedAttachmentPath = withContext(Dispatchers.IO) {
+                                val attachmentsDirPath = java.io.File(context.filesDir, "attachments").absolutePath
+                                val permanentUris = attachmentUris.map { uriStr ->
+                                    if (uriStr.startsWith(attachmentsDirPath) && java.io.File(uriStr).exists()) {
+                                        uriStr
+                                    } else {
+                                        com.example.utils.ImageUtils.compressAndSaveImage(context, uriStr, "attachments") ?: uriStr
+                                    }
+                                }
+                                if (permanentUris.isNotEmpty()) permanentUris.joinToString("|") else null
+                            }
+
+                            if (transactionToEdit == null) {
+                                viewModel.addTransaction(
+                                    customerId = customerId,
                                     transactionType = transactionType,
                                     amount = amount,
-                                    comment = commentText.trim(),
+                                    comment = commentText,
                                     category = selectedCategory,
                                     paymentMode = paymentMode,
-                                    dateTimestamp = selectedDate.timeInMillis,
-                                    attachmentPath = joinedAttachmentPath
+                                    dateTimestamp = selectedDateMillis,
+                                    attachmentPath = joinedAttachmentPath,
+                                    onSuccess = {
+                                        isSaving = false
+                                        onDismiss()
+                                    },
+                                    onError = { err ->
+                                        isSaving = false
+                                        android.widget.Toast.makeText(
+                                            context,
+                                            "Failed to save entry: ${err.localizedMessage ?: "Unknown error"}",
+                                            android.widget.Toast.LENGTH_SHORT
+                                        ).show()
+                                    }
                                 )
-                            )
+                            } else {
+                                viewModel.updateTransaction(
+                                    transaction = transactionToEdit.copy(
+                                        transactionType = transactionType,
+                                        amount = amount,
+                                        comment = commentText.trim(),
+                                        category = selectedCategory,
+                                        paymentMode = paymentMode,
+                                        dateTimestamp = selectedDateMillis,
+                                        attachmentPath = joinedAttachmentPath
+                                    ),
+                                    onSuccess = {
+                                        isSaving = false
+                                        onDismiss()
+                                    },
+                                    onError = { err ->
+                                        isSaving = false
+                                        android.widget.Toast.makeText(
+                                            context,
+                                            "Failed to update entry: ${err.localizedMessage ?: "Unknown error"}",
+                                            android.widget.Toast.LENGTH_SHORT
+                                        ).show()
+                                    }
+                                )
+                            }
                         }
-                        onDismiss()
                     }
                 },
                 colors = ButtonDefaults.buttonColors(
-                    containerColor = if (transactionType == "I_PAID") RedDebit else GreenPrimary
+                    containerColor = if (transactionType == "I_PAID") c.redDebit else c.greenPrimary
                 ),
                 modifier = Modifier
                     .fillMaxWidth()
@@ -441,7 +534,7 @@ fun AddTransactionSheet(
                 Icon(Icons.Default.Save, contentDescription = null, tint = Color.White)
                 Spacer(modifier = Modifier.width(8.dp))
                 Text(
-                    if (transactionToEdit == null) "SAVE ENTRY" else "UPDATE ENTRY",
+                    if (transactionToEdit == null) s.save else "UPDATE ENTRY",
                     fontSize = 15.sp,
                     fontWeight = FontWeight.ExtraBold,
                     color = Color.White

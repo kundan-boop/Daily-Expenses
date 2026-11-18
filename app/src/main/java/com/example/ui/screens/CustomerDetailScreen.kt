@@ -22,9 +22,13 @@ import androidx.compose.material.icons.automirrored.filled.*
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.activity.compose.BackHandler
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.platform.LocalView
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.nestedscroll.nestedScroll
@@ -33,6 +37,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.paging.compose.collectAsLazyPagingItems
@@ -40,30 +45,84 @@ import androidx.paging.compose.itemKey
 import com.example.data.CustomerEntity
 import com.example.data.TransactionEntity
 import com.example.ui.DailyExpenseViewModel
+import com.example.ui.gallery.CustomerGalleryScreen
+import com.example.ui.gallery.FullScreenImageViewer
+import com.example.ui.gallery.flattenCustomerGalleryItems
 import com.example.ui.theme.*
+import com.example.utils.LocalAppStrings
 import java.text.SimpleDateFormat
 import java.util.*
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun CustomerDetailScreen(
-    customer: CustomerEntity,
+    customerId: Long,
     viewModel: DailyExpenseViewModel,
     onBackClick: () -> Unit,
     onAddEntryClick: (type: String) -> Unit, // "I_PAID" or "I_RECEIVED"
     onEditEntryClick: (TransactionEntity) -> Unit,
-    onEditCustomerClick: () -> Unit
+    onEditCustomerClick: (CustomerEntity) -> Unit
 ) {
     val context = LocalContext.current
+    val c = LedgerTheme.colors
+    val s = LocalAppStrings.current
+
+    val customerState by remember(customerId) {
+        viewModel.getCustomerFlow(customerId)
+    }.collectAsStateWithLifecycle(initialValue = null)
+
+    val customer = customerState
+    if (customer == null) {
+        BackHandler(enabled = true) { onBackClick() }
+        Scaffold(
+            contentWindowInsets = WindowInsets(0, 0, 0, 0),
+            containerColor = c.background,
+            topBar = {
+                Surface(color = c.card, shadowElevation = 2.dp) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .statusBarsPadding()
+                            .padding(horizontal = 4.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        IconButton(
+                            onClick = onBackClick,
+                            modifier = Modifier
+                                .size(48.dp)
+                                .testTag("customer_detail_back_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                                contentDescription = s.back,
+                                tint = c.textPrimary
+                            )
+                        }
+                    }
+                }
+            }
+        ) { innerPadding ->
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(innerPadding),
+                contentAlignment = Alignment.Center
+            ) {
+                CircularProgressIndicator(color = c.greenPrimary)
+            }
+        }
+        return
+    }
+
     val transactionsFlow = remember(customer.id) { viewModel.getTransactionsForCustomer(customer.id) }
-    val transactions by transactionsFlow.collectAsState(initial = emptyList())
+    val transactions by transactionsFlow.collectAsStateWithLifecycle(initialValue = emptyList())
 
     val pagedTransactionsFlow = remember(customer.id) { viewModel.getTransactionsForCustomerPagedFlow(customer.id) }
     val pagedTransactions = pagedTransactionsFlow.collectAsLazyPagingItems()
 
     // Independent Transaction Search State & Debounced Results from ViewModel
-    val searchQuery by viewModel.transactionSearchQuery.collectAsState()
-    val filteredTransactions by viewModel.filteredCustomerTransactions.collectAsState()
+    val searchQuery by viewModel.transactionSearchQuery.collectAsStateWithLifecycle()
+    val filteredTransactions by viewModel.filteredCustomerTransactions.collectAsStateWithLifecycle()
     var isSearchVisible by remember { mutableStateOf(false) }
 
     // Set active customer in ViewModel for transaction search and clear on exit
@@ -75,25 +134,33 @@ fun CustomerDetailScreen(
         }
     }
 
+    val view = LocalView.current
     val isImeVisible = WindowInsets.isImeVisible
     val keyboardController = LocalSoftwareKeyboardController.current
     val focusManager = LocalFocusManager.current
 
-    // 1. Keyboard-first Back behavior: closes only the keyboard & clears focus if keyboard is open
-    BackHandler(enabled = isImeVisible) {
-        keyboardController?.hide()
-        focusManager.clearFocus()
-    }
+    // Single deterministic BackHandler so predictive back & IME transitions never race
+    var showGalleryOverlay by remember { mutableStateOf(false) }
+    var viewingImageTarget by remember { mutableStateOf<Pair<Long, String>?>(null) }
 
-    // 2. Next Back clears search text and closes search bar if open
-    BackHandler(enabled = !isImeVisible && (isSearchVisible || searchQuery.isNotEmpty())) {
-        isSearchVisible = false
-        viewModel.clearTransactionSearchQuery()
-    }
-
-    // 3. Next Back navigates back to Customer List if search is closed
-    BackHandler(enabled = !isImeVisible && !isSearchVisible && searchQuery.isEmpty()) {
-        onBackClick()
+    BackHandler(enabled = !showGalleryOverlay && viewingImageTarget == null) {
+        val liveImeVisible = isImeVisible ||
+            (ViewCompat.getRootWindowInsets(view)?.isVisible(WindowInsetsCompat.Type.ime()) == true)
+        when {
+            liveImeVisible -> {
+                keyboardController?.hide()
+                focusManager.clearFocus()
+            }
+            isSearchVisible || searchQuery.isNotEmpty() -> {
+                isSearchVisible = false
+                viewModel.clearTransactionSearchQuery()
+                focusManager.clearFocus()
+            }
+            else -> {
+                viewModel.clearTransactionSearchQuery()
+                onBackClick()
+            }
+        }
     }
 
     val totalPaid = transactions.filter { it.transactionType == "I_PAID" }.sumOf { it.amount }
@@ -103,21 +170,12 @@ fun CustomerDetailScreen(
     // Cumulative balance calculated chronologically (oldest to newest: dateTimestamp ASC, id ASC)
     val runningTotalsByTxId by remember(transactions) {
         derivedStateOf {
-            val sorted = transactions.sortedWith(
-                compareBy<TransactionEntity> { it.dateTimestamp }.thenBy { it.id }
-            )
-            val map = HashMap<Long, Double>(sorted.size)
-            var currentBalance = 0.0
-            for (tx in sorted) {
-                if (tx.transactionType == "I_PAID") {
-                    currentBalance += tx.amount
-                } else {
-                    currentBalance -= tx.amount
-                }
-                map[tx.id] = currentBalance
-            }
-            map
+            com.example.utils.PdfReportExporter.computeRunningTotals(transactions)
         }
+    }
+
+    val galleryItems = remember(transactions) {
+        flattenCustomerGalleryItems(transactions)
     }
 
     val sdf = remember { SimpleDateFormat("dd MMM yyyy, hh:mm a", Locale.getDefault()) }
@@ -125,7 +183,6 @@ fun CustomerDetailScreen(
     var showDeleteCustomerDialog by remember { mutableStateOf(false) }
     var showDeleteConfirmDialog by remember { mutableStateOf(false) }
     var selectedTxForDelete by remember { mutableStateOf<TransactionEntity?>(null) }
-    var viewingImageUri by remember { mutableStateOf<String?>(null) }
     var showPdfExportSheet by remember { mutableStateOf(false) }
 
     val txListState = rememberLazyListState()
@@ -172,7 +229,7 @@ fun CustomerDetailScreen(
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
         topBar = {
             Surface(
-                color = Color.White,
+                color = c.card,
                 shadowElevation = 2.dp
             ) {
                 Column(
@@ -193,13 +250,21 @@ fun CustomerDetailScreen(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         IconButton(
-                            onClick = onBackClick,
-                            modifier = Modifier.size(40.dp)
+                            onClick = {
+                                keyboardController?.hide()
+                                focusManager.clearFocus()
+                                isSearchVisible = false
+                                viewModel.clearTransactionSearchQuery()
+                                onBackClick()
+                            },
+                            modifier = Modifier
+                                .size(48.dp)
+                                .testTag("customer_detail_back_button")
                         ) {
                             Icon(
                                 imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                                contentDescription = "Back",
-                                tint = Slate900
+                                contentDescription = s.back,
+                                tint = c.textPrimary
                             )
                         }
 
@@ -207,18 +272,19 @@ fun CustomerDetailScreen(
                             text = customer.name,
                             fontWeight = FontWeight.ExtraBold,
                             fontSize = 18.sp,
-                            color = Slate900,
+                            color = c.textPrimary,
                             lineHeight = 22.sp,
                             modifier = Modifier
                                 .weight(1f)
                                 .padding(horizontal = 4.dp, vertical = 2.dp)
                                 .wrapContentHeight()
+                                .testTag("customer_detail_name")
                         )
 
-                        // Right-side Action Icons (Call, Edit, Delete)
+                        // Right-side Action Icons (Call, Edit, Delete) - 48dp min touch targets for accessibility
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(2.dp),
+                            horizontalArrangement = Arrangement.spacedBy(0.dp),
                             modifier = Modifier.wrapContentHeight()
                         ) {
                             if (customer.mobileNumber.isNotBlank()) {
@@ -227,24 +293,26 @@ fun CustomerDetailScreen(
                                         val intent = Intent(Intent.ACTION_DIAL, Uri.parse("tel:${customer.mobileNumber}"))
                                         context.startActivity(intent)
                                     },
-                                    modifier = Modifier.size(36.dp)
+                                    modifier = Modifier.size(44.dp)
                                 ) {
-                                    Icon(Icons.Default.Call, contentDescription = "Call Customer", tint = OceanBlue, modifier = Modifier.size(20.dp))
+                                    Icon(Icons.Default.Call, contentDescription = "Call Customer", tint = c.blueAccent, modifier = Modifier.size(20.dp))
                                 }
                             }
 
                             IconButton(
-                                onClick = onEditCustomerClick,
-                                modifier = Modifier.size(36.dp)
+                                onClick = { onEditCustomerClick(customer) },
+                                modifier = Modifier
+                                    .size(44.dp)
+                                    .testTag("customer_detail_edit_button")
                             ) {
-                                Icon(Icons.Default.Edit, contentDescription = "Edit Customer", tint = GreenPrimary, modifier = Modifier.size(20.dp))
+                                Icon(Icons.Default.Edit, contentDescription = s.editCustomer, tint = c.greenPrimary, modifier = Modifier.size(20.dp))
                             }
 
                             IconButton(
                                 onClick = { showDeleteCustomerDialog = true },
-                                modifier = Modifier.size(36.dp)
+                                modifier = Modifier.size(44.dp)
                             ) {
-                                Icon(Icons.Default.Delete, contentDescription = "Delete Customer", tint = RedDebit, modifier = Modifier.size(20.dp))
+                                Icon(Icons.Default.Delete, contentDescription = "Delete Customer", tint = c.redDebit, modifier = Modifier.size(20.dp))
                             }
                         }
                     }
@@ -266,14 +334,14 @@ fun CustomerDetailScreen(
                                     Icon(
                                         imageVector = Icons.Default.Phone,
                                         contentDescription = "Phone Number",
-                                        tint = Slate500,
+                                        tint = c.textMuted,
                                         modifier = Modifier.size(13.dp)
                                     )
                                     Text(
                                         text = customer.mobileNumber,
                                         fontSize = 13.sp,
                                         fontWeight = FontWeight.Medium,
-                                        color = Slate500
+                                        color = c.textMuted
                                     )
                                 }
                             }
@@ -281,13 +349,13 @@ fun CustomerDetailScreen(
                             if (isDeduction) {
                                 Surface(
                                     shape = RoundedCornerShape(4.dp),
-                                    color = RedLight
+                                    color = c.redTint
                                 ) {
                                     Text(
                                         text = "EXPENSE ACCOUNT",
                                         fontSize = 9.sp,
                                         fontWeight = FontWeight.Bold,
-                                        color = RedDebit,
+                                        color = c.redDebit,
                                         modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
                                     )
                                 }
@@ -307,8 +375,8 @@ fun CustomerDetailScreen(
                                     true
                                 }
 
-                                val badgeBgColor = if (isPastOrToday) RedLight else GreenLight
-                                val badgeTextColor = if (isPastOrToday) RedDebit else GreenPrimary
+                                val badgeBgColor = if (isPastOrToday) c.redTint else c.greenTint
+                                val badgeTextColor = if (isPastOrToday) c.redDebit else c.greenPrimary
 
                                 Surface(
                                     shape = RoundedCornerShape(4.dp),
@@ -320,7 +388,7 @@ fun CustomerDetailScreen(
                                         }
                                         "DUE: " + sdf.format(Date(customer.collectDueDate!!)).uppercase()
                                     } else {
-                                        "COLLECT TODAY"
+                                        s.collectTodayBadge.uppercase()
                                     }
                                     Text(
                                         text = dateStr,
@@ -340,7 +408,7 @@ fun CustomerDetailScreen(
             // "I PAID" and "I RECEIVED" Fixed Action Bar
             Surface(
                 shadowElevation = 12.dp,
-                color = Color.White,
+                color = c.card,
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Box(
@@ -358,7 +426,7 @@ fun CustomerDetailScreen(
                     // I PAID (You Gave Money) Button
                     Button(
                         onClick = { onAddEntryClick("I_PAID") },
-                        colors = ButtonDefaults.buttonColors(containerColor = RedDebit),
+                        colors = ButtonDefaults.buttonColors(containerColor = c.redDebit, contentColor = Color.White),
                         contentPadding = PaddingValues(horizontal = 4.dp, vertical = 8.dp),
                         modifier = Modifier
                             .weight(1f)
@@ -369,7 +437,7 @@ fun CustomerDetailScreen(
                         Icon(Icons.Default.RemoveCircleOutline, contentDescription = null, modifier = Modifier.size(16.dp))
                         Spacer(modifier = Modifier.width(4.dp))
                         Text(
-                            "I PAID (GAVE ₹)",
+                            s.iPaidGave,
                             fontSize = 12.sp,
                             fontWeight = FontWeight.Bold,
                             maxLines = 1,
@@ -380,7 +448,7 @@ fun CustomerDetailScreen(
                     // I RECEIVED (Customer Paid You) Button
                     Button(
                         onClick = { onAddEntryClick("I_RECEIVED") },
-                        colors = ButtonDefaults.buttonColors(containerColor = GreenPrimary),
+                        colors = ButtonDefaults.buttonColors(containerColor = c.greenPrimary, contentColor = Color.White),
                         contentPadding = PaddingValues(horizontal = 4.dp, vertical = 8.dp),
                         modifier = Modifier
                             .weight(1f)
@@ -391,7 +459,7 @@ fun CustomerDetailScreen(
                         Icon(Icons.Default.AddCircleOutline, contentDescription = null, modifier = Modifier.size(16.dp))
                         Spacer(modifier = Modifier.width(4.dp))
                         Text(
-                            "I RECEIVED (GOT ₹)",
+                            s.iReceivedGot,
                             fontSize = 12.sp,
                             fontWeight = FontWeight.Bold,
                             maxLines = 1,
@@ -407,7 +475,7 @@ fun CustomerDetailScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
-                .background(SurfaceBackground)
+                .background(c.background)
         ) {
             val isDeductionCustomer = customer.name.contains("Deduction", ignoreCase = true)
 
@@ -425,10 +493,10 @@ fun CustomerDetailScreen(
                         shape = RoundedCornerShape(14.dp),
                         colors = CardDefaults.cardColors(
                             containerColor = when {
-                                isDeductionCustomer -> RedLight
-                                netBalance > 0.01 -> GreenLight
-                                netBalance < -0.01 -> RedLight
-                                else -> Slate100
+                                isDeductionCustomer -> c.redTint
+                                netBalance > 0.01 -> c.greenTint
+                                netBalance < -0.01 -> c.redTint
+                                else -> c.cardElevated
                             }
                         ),
                         elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
@@ -441,17 +509,17 @@ fun CustomerDetailScreen(
                                 .fillMaxWidth()
                                 .padding(horizontal = 12.dp, vertical = 8.dp)
                         ) {
-                            Row(
+                            FlowRow(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
-                                Column {
+                                Column(modifier = Modifier.padding(end = 8.dp)) {
                                     Text(
                                         text = if (isDeductionCustomer) "TOTAL EXPENSE" else "NET CURRENT BALANCE",
                                         fontSize = 9.sp,
                                         fontWeight = FontWeight.Bold,
-                                        color = Slate500,
+                                        color = c.textMuted,
                                         letterSpacing = 0.5.sp
                                     )
                                     Text(
@@ -459,26 +527,26 @@ fun CustomerDetailScreen(
                                         fontSize = 20.sp,
                                         fontWeight = FontWeight.ExtraBold,
                                         color = when {
-                                            isDeductionCustomer -> RedDebit
-                                            netBalance > 0.01 -> GreenPrimary
-                                            netBalance < -0.01 -> RedDebit
-                                            else -> Slate700
+                                            isDeductionCustomer -> c.redDebit
+                                            netBalance > 0.01 -> c.greenPrimary
+                                            netBalance < -0.01 -> c.redDebit
+                                            else -> c.textSecondary
                                         }
                                     )
                                     Text(
                                         text = when {
                                             isDeductionCustomer -> "EXPENSE ACCOUNT"
-                                            netBalance > 0.01 -> "YOU GET (CUSTOMER OWES)"
-                                            netBalance < -0.01 -> "YOU GIVE (YOU OWE)"
-                                            else -> "SETTLED (NO BALANCE)"
+                                            netBalance > 0.01 -> s.youllGet
+                                            netBalance < -0.01 -> s.youGave
+                                            else -> s.settled
                                         },
                                         fontSize = 10.sp,
                                         fontWeight = FontWeight.Bold,
                                         color = when {
-                                            isDeductionCustomer -> RedDebit
-                                            netBalance > 0.01 -> GreenPrimary
-                                            netBalance < -0.01 -> RedDebit
-                                            else -> Slate500
+                                            isDeductionCustomer -> c.redDebit
+                                            netBalance > 0.01 -> c.greenPrimary
+                                            netBalance < -0.01 -> c.redDebit
+                                            else -> c.textMuted
                                         }
                                     )
                                 }
@@ -492,12 +560,13 @@ fun CustomerDetailScreen(
                                             showPdfExportSheet = true
                                         },
                                         shape = RoundedCornerShape(8.dp),
-                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
-                                        modifier = Modifier.height(32.dp)
+                                        border = androidx.compose.foundation.BorderStroke(1.dp, c.blueAccent.copy(alpha = 0.5f)),
+                                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                        modifier = Modifier.heightIn(min = 38.dp)
                                     ) {
-                                        Icon(Icons.Default.FileDownload, contentDescription = null, modifier = Modifier.size(12.dp), tint = SecondaryBlue)
+                                        Icon(Icons.Default.FileDownload, contentDescription = null, modifier = Modifier.size(14.dp), tint = c.blueAccent)
                                         Spacer(modifier = Modifier.width(4.dp))
-                                        Text("PDF Report", fontSize = 10.sp, color = SecondaryBlue, fontWeight = FontWeight.Bold)
+                                        Text(s.exportPdf, fontSize = 11.sp, color = c.blueAccent, fontWeight = FontWeight.Bold, maxLines = 1)
                                     }
 
                                     Button(
@@ -509,14 +578,14 @@ fun CustomerDetailScreen(
                                             }
                                             context.startActivity(Intent.createChooser(shareIntent, "Send Payment Reminder"))
                                         },
-                                        colors = ButtonDefaults.buttonColors(containerColor = SecondaryBlue),
+                                        colors = ButtonDefaults.buttonColors(containerColor = c.blueAccent, contentColor = Color.White),
                                         shape = RoundedCornerShape(8.dp),
-                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
-                                        modifier = Modifier.height(32.dp)
+                                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                        modifier = Modifier.heightIn(min = 38.dp)
                                     ) {
-                                        Icon(Icons.AutoMirrored.Filled.Send, contentDescription = null, modifier = Modifier.size(12.dp))
+                                        Icon(Icons.AutoMirrored.Filled.Send, contentDescription = null, modifier = Modifier.size(14.dp))
                                         Spacer(modifier = Modifier.width(4.dp))
-                                        Text("Reminder", fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                                        Text("Reminder", fontSize = 11.sp, fontWeight = FontWeight.Bold, maxLines = 1)
                                     }
                                 }
                             }
@@ -529,16 +598,16 @@ fun CustomerDetailScreen(
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Text(
-                                    text = "Paid: ₹${String.format("%,.0f", totalPaid)}",
+                                    text = "${s.totalGaveLabel}: ₹${String.format("%,.0f", totalPaid)}",
                                     fontSize = 11.sp,
                                     fontWeight = FontWeight.Bold,
-                                    color = RedDebit
+                                    color = c.redDebit
                                 )
                                 Text(
-                                    text = "Received: ₹${String.format("%,.0f", totalReceived)}",
+                                    text = "${s.totalGotLabel}: ₹${String.format("%,.0f", totalReceived)}",
                                     fontSize = 11.sp,
                                     fontWeight = FontWeight.Bold,
-                                    color = GreenPrimary
+                                    color = c.greenPrimary
                                 )
                             }
                         }
@@ -555,24 +624,64 @@ fun CustomerDetailScreen(
                             text = "Transaction History",
                             fontSize = 14.sp,
                             fontWeight = FontWeight.Bold,
-                            color = Slate900
+                            color = c.textPrimary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f)
                         )
 
-                        IconButton(
-                            onClick = {
-                                isSearchVisible = !isSearchVisible
-                                if (!isSearchVisible) {
-                                    viewModel.clearTransactionSearchQuery()
-                                }
-                            },
-                            modifier = Modifier.size(32.dp)
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
                         ) {
-                            Icon(
-                                imageVector = Icons.Default.Search,
-                                contentDescription = "Search Transactions",
-                                tint = if (isSearchVisible || searchQuery.isNotEmpty()) SecondaryBlue else Slate700,
-                                modifier = Modifier.size(20.dp)
-                            )
+                            OutlinedButton(
+                                onClick = { showGalleryOverlay = true },
+                                shape = RoundedCornerShape(10.dp),
+                                border = androidx.compose.foundation.BorderStroke(1.dp, c.greenPrimary.copy(alpha = 0.45f)),
+                                colors = ButtonDefaults.outlinedButtonColors(
+                                    containerColor = c.greenTint,
+                                    contentColor = c.greenPrimary
+                                ),
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
+                                modifier = Modifier
+                                    .heightIn(min = 36.dp)
+                                    .minimumInteractiveComponentSize()
+                                    .testTag("customer_gallery_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.PhotoLibrary,
+                                    contentDescription = "Open Customer Gallery",
+                                    tint = c.greenPrimary,
+                                    modifier = Modifier.size(15.dp)
+                                )
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text(
+                                    text = if (galleryItems.isNotEmpty()) "${s.viewGallery} (${galleryItems.size})" else s.viewGallery,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = c.greenPrimary,
+                                    maxLines = 1
+                                )
+                            }
+
+                            IconButton(
+                                onClick = {
+                                    isSearchVisible = !isSearchVisible
+                                    if (!isSearchVisible) {
+                                        viewModel.clearTransactionSearchQuery()
+                                    }
+                                },
+                                modifier = Modifier
+                                    .size(48.dp)
+                                    .testTag("customer_detail_search_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Search,
+                                    contentDescription = s.searchTransactionsPlaceholder,
+                                    tint = if (isSearchVisible || searchQuery.isNotEmpty()) c.blueAccent else c.textSecondary,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
                         }
                     }
 
@@ -580,25 +689,25 @@ fun CustomerDetailScreen(
                         OutlinedTextField(
                             value = searchQuery,
                             onValueChange = { viewModel.setTransactionSearchQuery(it) },
-                            placeholder = { Text("Search transactions", fontSize = 12.sp, color = Slate400) },
+                            placeholder = { Text(s.searchTransactionsPlaceholder, fontSize = 12.sp, color = c.textMuted) },
                             leadingIcon = {
-                                Icon(Icons.Default.Search, contentDescription = null, tint = Slate400, modifier = Modifier.size(18.dp))
+                                Icon(Icons.Default.Search, contentDescription = null, tint = c.textMuted, modifier = Modifier.size(18.dp))
                             },
                             trailingIcon = {
                                 if (searchQuery.isNotEmpty()) {
                                     IconButton(onClick = { viewModel.clearTransactionSearchQuery() }) {
-                                        Icon(Icons.Default.Close, contentDescription = "Clear search", tint = Slate400, modifier = Modifier.size(18.dp))
+                                        Icon(Icons.Default.Close, contentDescription = "Clear search", tint = c.textMuted, modifier = Modifier.size(18.dp))
                                     }
                                 }
                             },
                             singleLine = true,
                             colors = OutlinedTextFieldDefaults.colors(
-                                focusedTextColor = Slate900,
-                                unfocusedTextColor = Slate900,
-                                focusedBorderColor = SecondaryBlue,
-                                unfocusedBorderColor = Slate200,
-                                focusedContainerColor = Color.White,
-                                unfocusedContainerColor = Color.White
+                                focusedTextColor = c.textPrimary,
+                                unfocusedTextColor = c.textPrimary,
+                                focusedBorderColor = c.blueAccent,
+                                unfocusedBorderColor = c.border,
+                                focusedContainerColor = c.card,
+                                unfocusedContainerColor = c.card
                             ),
                             shape = RoundedCornerShape(12.dp),
                             modifier = Modifier
@@ -620,12 +729,12 @@ fun CustomerDetailScreen(
                         Icon(
                             Icons.AutoMirrored.Filled.ReceiptLong,
                             contentDescription = null,
-                            tint = Slate400,
+                            tint = c.textMuted,
                             modifier = Modifier.size(48.dp)
                         )
                         Spacer(modifier = Modifier.height(8.dp))
-                        Text("No transaction entries yet", color = Slate500)
-                        Text("Tap 'I PAID' or 'I RECEIVED' to record an entry", fontSize = 12.sp, color = Slate400)
+                        Text(s.noTransactionsYet, color = c.textSecondary)
+                        Text(s.noRecentEntriesHint, fontSize = 12.sp, color = c.textMuted)
                     }
                 }
             } else if (searchQuery.isNotBlank() && filteredTransactions.isEmpty()) {
@@ -639,12 +748,12 @@ fun CustomerDetailScreen(
                         Icon(
                             Icons.Default.SearchOff,
                             contentDescription = null,
-                            tint = Slate400,
+                            tint = c.textMuted,
                             modifier = Modifier.size(48.dp)
                         )
                         Spacer(modifier = Modifier.height(8.dp))
-                        Text("No transactions found", fontWeight = FontWeight.SemiBold, color = Slate700)
-                        Text("No entry found for '$searchQuery'", fontSize = 12.sp, color = Slate500)
+                        Text(s.noTransactionsFound, fontWeight = FontWeight.SemiBold, color = c.textPrimary)
+                        Text("No entry found for '$searchQuery'", fontSize = 12.sp, color = c.textMuted)
                     }
                 }
             } else if (searchQuery.isNotBlank()) {
@@ -669,7 +778,9 @@ fun CustomerDetailScreen(
                                 selectedTxForDelete = tx
                                 showDeleteConfirmDialog = true
                             },
-                            onImageClick = { viewingImageUri = it }
+                            onImageClick = { clickedPath ->
+                                viewingImageTarget = tx.id to clickedPath
+                            }
                         )
                     }
                 }
@@ -697,7 +808,9 @@ fun CustomerDetailScreen(
                                     selectedTxForDelete = tx
                                     showDeleteConfirmDialog = true
                                 },
-                                onImageClick = { viewingImageUri = it }
+                                onImageClick = { clickedPath ->
+                                    viewingImageTarget = tx.id to clickedPath
+                                }
                             )
                         }
                     }
@@ -706,55 +819,49 @@ fun CustomerDetailScreen(
         }
     }
 
-    // Image Viewer Modal Dialog
-    if (viewingImageUri != null) {
-        AlertDialog(
-            onDismissRequest = { viewingImageUri = null },
-            containerColor = Color.Black,
-            properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false),
-            modifier = Modifier.fillMaxSize(),
-            title = {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text("Attachment Photo", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
-                    IconButton(onClick = { viewingImageUri = null }) {
-                        Icon(Icons.Default.Close, contentDescription = "Close", tint = Color.White)
-                    }
-                }
-            },
-            text = {
-                Box(
-                    modifier = Modifier.fillMaxSize(),
-                    contentAlignment = Alignment.Center
-                ) {
-                    coil.compose.AsyncImage(
-                        model = viewingImageUri,
-                        contentDescription = "Transaction Receipt",
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .wrapContentHeight()
-                    )
-                }
-            },
-            confirmButton = {}
+    // Full-Screen Paging Image Viewer (opened when tapping any entry photo pill)
+    if (viewingImageTarget != null && galleryItems.isNotEmpty()) {
+        val target = viewingImageTarget!!
+        val startIndex = galleryItems.indexOfFirst {
+            it.transaction.id == target.first && it.imagePath == target.second
+        }.let { if (it >= 0) it else 0 }
+
+        FullScreenImageViewer(
+            items = galleryItems,
+            initialIndex = startIndex,
+            onDismiss = { viewingImageTarget = null },
+            onDeleteImage = { tx, imagePath ->
+                viewModel.removeTransactionImage(tx, imagePath)
+            }
         )
+    }
+
+    // Customer Images Gallery Overlay (preserves LazyColumn scroll state beneath)
+    if (showGalleryOverlay) {
+        Surface(modifier = Modifier.fillMaxSize()) {
+            CustomerGalleryScreen(
+                customer = customer,
+                transactions = transactions,
+                onBackClick = { showGalleryOverlay = false },
+                onDeleteImage = { tx, imagePath ->
+                    viewModel.removeTransactionImage(tx, imagePath)
+                }
+            )
+        }
     }
 
     if (showDeleteCustomerDialog) {
         AlertDialog(
             onDismissRequest = { showDeleteCustomerDialog = false },
-            containerColor = Color.White,
+            containerColor = c.card,
             shape = RoundedCornerShape(20.dp),
             properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false),
             modifier = Modifier
                 .fillMaxWidth()
                 .widthIn(max = 480.dp)
                 .padding(horizontal = 16.dp),
-            title = { Text("Delete Customer?", fontWeight = FontWeight.Bold, color = Slate900) },
-            text = { Text("Are you sure you want to delete ${customer.name}? All transaction history for this customer will be deleted.", color = Slate700) },
+            title = { Text("Delete Customer?", fontWeight = FontWeight.Bold, color = c.textPrimary) },
+            text = { Text("Are you sure you want to delete ${customer.name}? All transaction history for this customer will be deleted.", color = c.textSecondary) },
             confirmButton = {
                 Button(
                     onClick = {
@@ -763,18 +870,18 @@ fun CustomerDetailScreen(
                         onBackClick()
                     },
                     shape = RoundedCornerShape(10.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = RedDebit)
+                    colors = ButtonDefaults.buttonColors(containerColor = c.redDebit)
                 ) {
-                    Text("Delete", fontWeight = FontWeight.Bold, color = Color.White)
+                    Text(s.remove, fontWeight = FontWeight.Bold, color = Color.White)
                 }
             },
             dismissButton = {
                 OutlinedButton(
                     onClick = { showDeleteCustomerDialog = false },
                     shape = RoundedCornerShape(10.dp),
-                    border = androidx.compose.foundation.BorderStroke(1.dp, Slate300)
+                    border = androidx.compose.foundation.BorderStroke(1.dp, c.borderStrong)
                 ) {
-                    Text("Cancel", color = Slate700, fontWeight = FontWeight.SemiBold)
+                    Text(s.cancel, color = c.textSecondary, fontWeight = FontWeight.SemiBold)
                 }
             }
         )
@@ -783,15 +890,15 @@ fun CustomerDetailScreen(
     if (showDeleteConfirmDialog && selectedTxForDelete != null) {
         AlertDialog(
             onDismissRequest = { showDeleteConfirmDialog = false },
-            containerColor = Color.White,
+            containerColor = c.card,
             shape = RoundedCornerShape(20.dp),
             properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false),
             modifier = Modifier
                 .fillMaxWidth()
                 .widthIn(max = 480.dp)
                 .padding(horizontal = 16.dp),
-            title = { Text("Delete Entry?", fontWeight = FontWeight.Bold, color = Slate900) },
-            text = { Text("Are you sure you want to delete this transaction entry of ₹${selectedTxForDelete?.amount}?", color = Slate700) },
+            title = { Text("Delete Entry?", fontWeight = FontWeight.Bold, color = c.textPrimary) },
+            text = { Text("Are you sure you want to delete this transaction entry of ₹${selectedTxForDelete?.amount}?", color = c.textSecondary) },
             confirmButton = {
                 Button(
                     onClick = {
@@ -799,18 +906,18 @@ fun CustomerDetailScreen(
                         showDeleteConfirmDialog = false
                     },
                     shape = RoundedCornerShape(10.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = RedDebit)
+                    colors = ButtonDefaults.buttonColors(containerColor = c.redDebit)
                 ) {
-                    Text("Delete", fontWeight = FontWeight.Bold, color = Color.White)
+                    Text(s.remove, fontWeight = FontWeight.Bold, color = Color.White)
                 }
             },
             dismissButton = {
                 OutlinedButton(
                     onClick = { showDeleteConfirmDialog = false },
                     shape = RoundedCornerShape(10.dp),
-                    border = androidx.compose.foundation.BorderStroke(1.dp, Slate300)
+                    border = androidx.compose.foundation.BorderStroke(1.dp, c.borderStrong)
                 ) {
-                    Text("Cancel", color = Slate700, fontWeight = FontWeight.SemiBold)
+                    Text(s.cancel, color = c.textSecondary, fontWeight = FontWeight.SemiBold)
                 }
             }
         )
@@ -834,11 +941,13 @@ fun TransactionItemCard(
     onDelete: () -> Unit,
     onImageClick: (String) -> Unit
 ) {
+    val c = LedgerTheme.colors
+    val s = LocalAppStrings.current
     val isPaid = transaction.transactionType == "I_PAID"
 
     Card(
         shape = RoundedCornerShape(12.dp),
-        colors = CardDefaults.cardColors(containerColor = Color.White),
+        colors = CardDefaults.cardColors(containerColor = c.card),
         elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
         modifier = Modifier
             .fillMaxWidth()
@@ -854,13 +963,13 @@ fun TransactionItemCard(
                 modifier = Modifier
                     .size(36.dp)
                     .clip(CircleShape)
-                    .background(if (isPaid) RedLight else GreenLight),
+                    .background(if (isPaid) c.redTint else c.greenTint),
                 contentAlignment = Alignment.Center
             ) {
                 Icon(
                     imageVector = if (isPaid) Icons.Default.ArrowUpward else Icons.Default.ArrowDownward,
                     contentDescription = null,
-                    tint = if (isPaid) RedDebit else GreenPrimary,
+                    tint = if (isPaid) c.redDebit else c.greenPrimary,
                     modifier = Modifier.size(18.dp)
                 )
             }
@@ -874,17 +983,17 @@ fun TransactionItemCard(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
-                        text = if (isPaid) "I Paid (Gave)" else "I Received (Got)",
+                        text = if (isPaid) s.gaveCredit else s.gotPayment,
                         fontSize = 13.sp,
                         fontWeight = FontWeight.Bold,
-                        color = if (isPaid) RedDebit else GreenPrimary
+                        color = if (isPaid) c.redDebit else c.greenPrimary
                     )
 
                     Text(
                         text = String.format("₹%,.2f", transaction.amount),
                         fontSize = 15.sp,
                         fontWeight = FontWeight.ExtraBold,
-                        color = if (isPaid) RedDebit else GreenPrimary
+                        color = if (isPaid) c.redDebit else c.greenPrimary
                     )
                 }
 
@@ -894,7 +1003,7 @@ fun TransactionItemCard(
                     Text(
                         text = transaction.comment,
                         fontSize = 12.sp,
-                        color = Slate900,
+                        color = c.textPrimary,
                         fontWeight = FontWeight.Medium
                     )
                 }
@@ -909,31 +1018,40 @@ fun TransactionItemCard(
                     Text(
                         text = "${sdf.format(Date(transaction.dateTimestamp))} • ${transaction.paymentMode}",
                         fontSize = 10.sp,
-                        color = Slate400
+                        color = c.textMuted,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier
+                            .weight(1f)
+                            .padding(end = 6.dp)
                     )
 
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
                         IconButton(
                             onClick = onEdit,
-                            modifier = Modifier.size(22.dp)
+                            modifier = Modifier
+                                .size(36.dp)
+                                .minimumInteractiveComponentSize()
                         ) {
                             Icon(
                                 Icons.Default.Edit,
                                 contentDescription = "Edit Entry",
-                                tint = OceanBlue,
-                                modifier = Modifier.size(14.dp)
+                                tint = c.blueAccent,
+                                modifier = Modifier.size(16.dp)
                             )
                         }
 
                         IconButton(
                             onClick = onDelete,
-                            modifier = Modifier.size(22.dp)
+                            modifier = Modifier
+                                .size(36.dp)
+                                .minimumInteractiveComponentSize()
                         ) {
                             Icon(
                                 Icons.Default.DeleteOutline,
                                 contentDescription = "Delete Entry",
-                                tint = RedDebit,
-                                modifier = Modifier.size(14.dp)
+                                tint = c.redDebit,
+                                modifier = Modifier.size(16.dp)
                             )
                         }
                     }
@@ -951,8 +1069,8 @@ fun TransactionItemCard(
                             itemsIndexed(images) { idx, imgUri ->
                                 Surface(
                                     shape = RoundedCornerShape(6.dp),
-                                    color = GreenLight,
-                                    border = androidx.compose.foundation.BorderStroke(1.dp, GreenPrimary.copy(alpha = 0.3f)),
+                                    color = c.greenTint,
+                                    border = androidx.compose.foundation.BorderStroke(1.dp, c.greenPrimary.copy(alpha = 0.3f)),
                                     modifier = Modifier.clickable { onImageClick(imgUri) }
                                 ) {
                                     Row(
@@ -962,7 +1080,7 @@ fun TransactionItemCard(
                                         Icon(
                                             Icons.Default.Image,
                                             contentDescription = "View Attachment",
-                                            tint = GreenPrimary,
+                                            tint = c.greenPrimary,
                                             modifier = Modifier.size(12.dp)
                                         )
                                         Spacer(modifier = Modifier.width(4.dp))
@@ -970,7 +1088,7 @@ fun TransactionItemCard(
                                             text = "Photo ${idx + 1}",
                                             fontSize = 10.sp,
                                             fontWeight = FontWeight.Bold,
-                                            color = GreenPrimary
+                                            color = c.greenPrimary
                                         )
                                     }
                                 }
@@ -1002,7 +1120,7 @@ fun TransactionItemCard(
                             text = totalDisplay,
                             fontSize = 11.sp,
                             fontWeight = FontWeight.SemiBold,
-                            color = Slate500
+                            color = c.textSecondary
                         )
                     }
                 }
@@ -1011,12 +1129,7 @@ fun TransactionItemCard(
     }
 }
 
-enum class PdfDateFilterMode(val label: String) {
-    ALL("All Dates"),
-    SPECIFIC_MONTH("Month"),
-    DATE_RANGE("Date Range"),
-    SPECIFIC_YEAR("Year")
-}
+typealias PdfDateFilterMode = com.example.utils.PdfDateFilterMode
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -1066,8 +1179,14 @@ fun CustomerPdfExportSheet(
     val shortMonthNames = remember {
         listOf("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
     }
-    val availableYears = remember {
-        listOf(2022, 2023, 2024, 2025, 2026, 2027, 2028, 2029, 2030)
+    val availableYears = remember(transactions) {
+        val currentYr = calNow.get(Calendar.YEAR)
+        val txYears = transactions.map { tx ->
+            Calendar.getInstance().apply { timeInMillis = tx.dateTimestamp }.get(Calendar.YEAR)
+        }
+        val minYr = minOf(2022, txYears.minOrNull() ?: currentYr, currentYr - 2)
+        val maxYr = maxOf(2030, txYears.maxOrNull() ?: currentYr, currentYr + 2)
+        (minYr..maxYr).toList()
     }
 
     val sdfDay = remember { SimpleDateFormat("dd MMM yyyy", Locale.getDefault()) }
@@ -1139,7 +1258,7 @@ fun CustomerPdfExportSheet(
     }
 
     // Compute Filtered Transactions & Period Label
-    val (filteredTransactions, periodLabel) = remember(
+    val filteredResult = remember(
         filterMode,
         selectedMonth,
         selectedMonthYear,
@@ -1148,78 +1267,18 @@ fun CustomerPdfExportSheet(
         endDateMillis,
         transactions
     ) {
-        when (filterMode) {
-            PdfDateFilterMode.ALL -> {
-                Pair(transactions, "All Available Dates")
-            }
-            PdfDateFilterMode.SPECIFIC_MONTH -> {
-                val startCal = Calendar.getInstance().apply {
-                    set(Calendar.YEAR, selectedMonthYear)
-                    set(Calendar.MONTH, selectedMonth)
-                    set(Calendar.DAY_OF_MONTH, 1)
-                    set(Calendar.HOUR_OF_DAY, 0)
-                    set(Calendar.MINUTE, 0)
-                    set(Calendar.SECOND, 0)
-                    set(Calendar.MILLISECOND, 0)
-                }
-                val endCal = Calendar.getInstance().apply {
-                    set(Calendar.YEAR, selectedMonthYear)
-                    set(Calendar.MONTH, selectedMonth)
-                    set(Calendar.DAY_OF_MONTH, getActualMaximum(Calendar.DAY_OF_MONTH))
-                    set(Calendar.HOUR_OF_DAY, 23)
-                    set(Calendar.MINUTE, 59)
-                    set(Calendar.SECOND, 59)
-                    set(Calendar.MILLISECOND, 999)
-                }
-                val label = "${monthNames[selectedMonth]} $selectedMonthYear"
-                val filtered = transactions.filter { it.dateTimestamp in startCal.timeInMillis..endCal.timeInMillis }
-                Pair(filtered, label)
-            }
-            PdfDateFilterMode.SPECIFIC_YEAR -> {
-                val startCal = Calendar.getInstance().apply {
-                    set(Calendar.YEAR, selectedYearOnly)
-                    set(Calendar.MONTH, 0)
-                    set(Calendar.DAY_OF_MONTH, 1)
-                    set(Calendar.HOUR_OF_DAY, 0)
-                    set(Calendar.MINUTE, 0)
-                    set(Calendar.SECOND, 0)
-                    set(Calendar.MILLISECOND, 0)
-                }
-                val endCal = Calendar.getInstance().apply {
-                    set(Calendar.YEAR, selectedYearOnly)
-                    set(Calendar.MONTH, 11)
-                    set(Calendar.DAY_OF_MONTH, 31)
-                    set(Calendar.HOUR_OF_DAY, 23)
-                    set(Calendar.MINUTE, 59)
-                    set(Calendar.SECOND, 59)
-                    set(Calendar.MILLISECOND, 999)
-                }
-                val label = "Year $selectedYearOnly"
-                val filtered = transactions.filter { it.dateTimestamp in startCal.timeInMillis..endCal.timeInMillis }
-                Pair(filtered, label)
-            }
-            PdfDateFilterMode.DATE_RANGE -> {
-                val startCal = Calendar.getInstance().apply {
-                    timeInMillis = startDateMillis
-                    set(Calendar.HOUR_OF_DAY, 0)
-                    set(Calendar.MINUTE, 0)
-                    set(Calendar.SECOND, 0)
-                    set(Calendar.MILLISECOND, 0)
-                }
-                val endCal = Calendar.getInstance().apply {
-                    timeInMillis = endDateMillis
-                    set(Calendar.HOUR_OF_DAY, 23)
-                    set(Calendar.MINUTE, 59)
-                    set(Calendar.SECOND, 59)
-                    set(Calendar.MILLISECOND, 999)
-                }
-                val isSameDay = sdfDay.format(startCal.time) == sdfDay.format(endCal.time)
-                val label = if (isSameDay) sdfDay.format(startCal.time) else "${sdfDay.format(startCal.time)} – ${sdfDay.format(endCal.time)}"
-                val filtered = transactions.filter { it.dateTimestamp in startCal.timeInMillis..endCal.timeInMillis }
-                Pair(filtered, label)
-            }
-        }
+        com.example.utils.PdfReportExporter.filterTransactionsForPeriod(
+            transactions = transactions,
+            filterMode = filterMode,
+            selectedMonth = selectedMonth,
+            selectedMonthYear = selectedMonthYear,
+            selectedYearOnly = selectedYearOnly,
+            startDateMillis = startDateMillis,
+            endDateMillis = endDateMillis
+        )
     }
+    val filteredTransactions = filteredResult.transactions
+    val periodLabel = filteredResult.periodLabel
 
     val filteredReceived = filteredTransactions.filter { it.transactionType == "I_RECEIVED" }.sumOf { it.amount }
     val filteredPaid = filteredTransactions.filter { it.transactionType == "I_PAID" }.sumOf { it.amount }
@@ -1229,6 +1288,7 @@ fun CustomerPdfExportSheet(
     fun exportPdf() {
         if (filteredTransactions.isEmpty()) {
             Toast.makeText(context, "No data available for the selected period", Toast.LENGTH_SHORT).show()
+            return
         }
         try {
             val pdfFile = com.example.utils.PdfReportExporter.generateCustomerLedgerPdf(
@@ -1257,10 +1317,13 @@ fun CustomerPdfExportSheet(
         }
     }
 
+    val c = LedgerTheme.colors
+    val s = LocalAppStrings.current
+
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-        containerColor = Color.White,
+        containerColor = c.card,
         scrimColor = Color.Black.copy(alpha = 0.5f)
     ) {
         Column(
@@ -1284,12 +1347,12 @@ fun CustomerPdfExportSheet(
                         text = "Export Customer PDF Report",
                         fontSize = 18.sp,
                         fontWeight = FontWeight.ExtraBold,
-                        color = Slate900
+                        color = c.textPrimary
                     )
                     Text(
                         text = "Choose date, month, year, or export all transactions.",
                         fontSize = 12.sp,
-                        color = Slate500
+                        color = c.textMuted
                     )
                 }
 
@@ -1299,8 +1362,8 @@ fun CustomerPdfExportSheet(
                 ) {
                     Icon(
                         imageVector = Icons.Default.Close,
-                        contentDescription = "Close",
-                        tint = Slate500,
+                        contentDescription = s.close,
+                        tint = c.textMuted,
                         modifier = Modifier.size(20.dp)
                     )
                 }
@@ -1313,17 +1376,17 @@ fun CustomerPdfExportSheet(
                 text = "FILTER BY",
                 fontSize = 11.sp,
                 fontWeight = FontWeight.Bold,
-                color = Slate500,
+                color = c.textMuted,
                 letterSpacing = 0.5.sp
             )
 
             Spacer(modifier = Modifier.height(6.dp))
 
-            Row(
+            LazyRow(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                PdfDateFilterMode.values().forEach { mode ->
+                items(PdfDateFilterMode.values()) { mode ->
                     val isSelected = filterMode == mode
                     FilterChip(
                         selected = isSelected,
@@ -1331,7 +1394,9 @@ fun CustomerPdfExportSheet(
                         label = {
                             Text(
                                 text = mode.label,
-                                fontSize = 11.sp,
+                                fontSize = 12.sp,
+                                maxLines = 1,
+                                softWrap = false,
                                 fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium
                             )
                         },
@@ -1348,21 +1413,20 @@ fun CustomerPdfExportSheet(
                             )
                         },
                         colors = FilterChipDefaults.filterChipColors(
-                            selectedContainerColor = PrimaryNavy,
+                            selectedContainerColor = c.blueAccent,
                             selectedLabelColor = Color.White,
                             selectedLeadingIconColor = Color.White,
-                            containerColor = Slate50,
-                            labelColor = Slate700,
-                            iconColor = Slate500
+                            containerColor = c.surfaceSubtle,
+                            labelColor = c.textSecondary,
+                            iconColor = c.textMuted
                         ),
                         border = FilterChipDefaults.filterChipBorder(
                             enabled = true,
                             selected = isSelected,
-                            borderColor = Slate200,
-                            selectedBorderColor = PrimaryNavy
+                            borderColor = c.border,
+                            selectedBorderColor = c.blueAccent
                         ),
-                        shape = RoundedCornerShape(8.dp),
-                        modifier = Modifier.weight(1f)
+                        shape = RoundedCornerShape(8.dp)
                     )
                 }
             }
@@ -1374,8 +1438,8 @@ fun CustomerPdfExportSheet(
                 PdfDateFilterMode.ALL -> {
                     Surface(
                         shape = RoundedCornerShape(10.dp),
-                        color = Slate50,
-                        border = androidx.compose.foundation.BorderStroke(1.dp, Slate200),
+                        color = c.surfaceSubtle,
+                        border = androidx.compose.foundation.BorderStroke(1.dp, c.border),
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Row(
@@ -1385,14 +1449,14 @@ fun CustomerPdfExportSheet(
                             Icon(
                                 imageVector = Icons.Default.Info,
                                 contentDescription = null,
-                                tint = SecondaryBlue,
+                                tint = c.blueAccent,
                                 modifier = Modifier.size(18.dp)
                             )
                             Spacer(modifier = Modifier.width(8.dp))
                             Text(
                                 text = "Exporting all ${transactions.size} available transactions recorded for ${customer.name}.",
                                 fontSize = 12.sp,
-                                color = Slate700
+                                color = c.textSecondary
                             )
                         }
                     }
@@ -1401,8 +1465,8 @@ fun CustomerPdfExportSheet(
                 PdfDateFilterMode.SPECIFIC_MONTH -> {
                     Card(
                         shape = RoundedCornerShape(12.dp),
-                        colors = CardDefaults.cardColors(containerColor = Slate50),
-                        border = androidx.compose.foundation.BorderStroke(1.dp, Slate200),
+                        colors = CardDefaults.cardColors(containerColor = c.surfaceSubtle),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, c.border),
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Column(modifier = Modifier.padding(12.dp)) {
@@ -1423,14 +1487,14 @@ fun CustomerPdfExportSheet(
                                     },
                                     modifier = Modifier.size(28.dp)
                                 ) {
-                                    Icon(Icons.Default.ChevronLeft, contentDescription = "Previous Month", tint = Slate700)
+                                    Icon(Icons.Default.ChevronLeft, contentDescription = "Previous Month", tint = c.textSecondary)
                                 }
 
                                 Text(
                                     text = "${monthNames[selectedMonth]} $selectedMonthYear",
                                     fontSize = 14.sp,
                                     fontWeight = FontWeight.Bold,
-                                    color = Slate900
+                                    color = c.textPrimary
                                 )
 
                                 IconButton(
@@ -1444,7 +1508,7 @@ fun CustomerPdfExportSheet(
                                     },
                                     modifier = Modifier.size(28.dp)
                                 ) {
-                                    Icon(Icons.Default.ChevronRight, contentDescription = "Next Month", tint = Slate700)
+                                    Icon(Icons.Default.ChevronRight, contentDescription = "Next Month", tint = c.textSecondary)
                                 }
                             }
 
@@ -1462,10 +1526,10 @@ fun CustomerPdfExportSheet(
                                             val isMonthSelected = selectedMonth == mIdx
                                             Surface(
                                                 shape = RoundedCornerShape(6.dp),
-                                                color = if (isMonthSelected) SecondaryBlue else Color.White,
+                                                color = if (isMonthSelected) c.blueAccent else c.card,
                                                 border = androidx.compose.foundation.BorderStroke(
                                                     1.dp,
-                                                    if (isMonthSelected) SecondaryBlue else Slate200
+                                                    if (isMonthSelected) c.blueAccent else c.border
                                                 ),
                                                 modifier = Modifier
                                                     .weight(1f)
@@ -1475,7 +1539,7 @@ fun CustomerPdfExportSheet(
                                                     text = shortMonthNames[mIdx],
                                                     fontSize = 11.sp,
                                                     fontWeight = if (isMonthSelected) FontWeight.Bold else FontWeight.Medium,
-                                                    color = if (isMonthSelected) Color.White else Slate700,
+                                                    color = if (isMonthSelected) Color.White else c.textSecondary,
                                                     textAlign = androidx.compose.ui.text.style.TextAlign.Center,
                                                     modifier = Modifier.padding(vertical = 6.dp)
                                                 )
@@ -1496,10 +1560,10 @@ fun CustomerPdfExportSheet(
                                     val isYrSelected = selectedMonthYear == yr
                                     Surface(
                                         shape = RoundedCornerShape(6.dp),
-                                        color = if (isYrSelected) Slate900 else Color.White,
+                                        color = if (isYrSelected) c.blueAccent else c.card,
                                         border = androidx.compose.foundation.BorderStroke(
                                             1.dp,
-                                            if (isYrSelected) Slate900 else Slate200
+                                            if (isYrSelected) c.blueAccent else c.border
                                         ),
                                         modifier = Modifier.clickable { selectedMonthYear = yr }
                                     ) {
@@ -1507,7 +1571,7 @@ fun CustomerPdfExportSheet(
                                             text = yr.toString(),
                                             fontSize = 11.sp,
                                             fontWeight = if (isYrSelected) FontWeight.Bold else FontWeight.Normal,
-                                            color = if (isYrSelected) Color.White else Slate700,
+                                            color = if (isYrSelected) Color.White else c.textSecondary,
                                             modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
                                         )
                                     }
@@ -1520,8 +1584,8 @@ fun CustomerPdfExportSheet(
                 PdfDateFilterMode.SPECIFIC_YEAR -> {
                     Card(
                         shape = RoundedCornerShape(12.dp),
-                        colors = CardDefaults.cardColors(containerColor = Slate50),
-                        border = androidx.compose.foundation.BorderStroke(1.dp, Slate200),
+                        colors = CardDefaults.cardColors(containerColor = c.surfaceSubtle),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, c.border),
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Column(modifier = Modifier.padding(12.dp)) {
@@ -1534,51 +1598,49 @@ fun CustomerPdfExportSheet(
                                     onClick = { selectedYearOnly-- },
                                     modifier = Modifier.size(28.dp)
                                 ) {
-                                    Icon(Icons.Default.ChevronLeft, contentDescription = "Previous Year", tint = Slate700)
+                                    Icon(Icons.Default.ChevronLeft, contentDescription = "Previous Year", tint = c.textSecondary)
                                 }
 
                                 Text(
                                     text = "Year $selectedYearOnly",
                                     fontSize = 15.sp,
                                     fontWeight = FontWeight.Bold,
-                                    color = Slate900
+                                    color = c.textPrimary
                                 )
 
                                 IconButton(
                                     onClick = { selectedYearOnly++ },
                                     modifier = Modifier.size(28.dp)
                                 ) {
-                                    Icon(Icons.Default.ChevronRight, contentDescription = "Next Year", tint = Slate700)
+                                    Icon(Icons.Default.ChevronRight, contentDescription = "Next Year", tint = c.textSecondary)
                                 }
                             }
 
                             Spacer(modifier = Modifier.height(10.dp))
 
-                            // Year Selection Grid
-                            Row(
+                            // Year Selection Row
+                            LazyRow(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.spacedBy(6.dp)
                             ) {
-                                listOf(2023, 2024, 2025, 2026, 2027).forEach { yr ->
+                                items(availableYears) { yr ->
                                     val isYrSelected = selectedYearOnly == yr
                                     Surface(
                                         shape = RoundedCornerShape(8.dp),
-                                        color = if (isYrSelected) SecondaryBlue else Color.White,
+                                        color = if (isYrSelected) c.blueAccent else c.card,
                                         border = androidx.compose.foundation.BorderStroke(
                                             1.dp,
-                                            if (isYrSelected) SecondaryBlue else Slate200
+                                            if (isYrSelected) c.blueAccent else c.border
                                         ),
-                                        modifier = Modifier
-                                            .weight(1f)
-                                            .clickable { selectedYearOnly = yr }
+                                        modifier = Modifier.clickable { selectedYearOnly = yr }
                                     ) {
                                         Text(
                                             text = yr.toString(),
                                             fontSize = 12.sp,
                                             fontWeight = if (isYrSelected) FontWeight.Bold else FontWeight.Medium,
-                                            color = if (isYrSelected) Color.White else Slate700,
+                                            color = if (isYrSelected) Color.White else c.textSecondary,
                                             textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-                                            modifier = Modifier.padding(vertical = 8.dp)
+                                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp)
                                         )
                                     }
                                 }
@@ -1590,8 +1652,8 @@ fun CustomerPdfExportSheet(
                 PdfDateFilterMode.DATE_RANGE -> {
                     Card(
                         shape = RoundedCornerShape(12.dp),
-                        colors = CardDefaults.cardColors(containerColor = Slate50),
-                        border = androidx.compose.foundation.BorderStroke(1.dp, Slate200),
+                        colors = CardDefaults.cardColors(containerColor = c.surfaceSubtle),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, c.border),
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Column(modifier = Modifier.padding(12.dp)) {
@@ -1600,7 +1662,7 @@ fun CustomerPdfExportSheet(
                                 text = "QUICK PRESETS",
                                 fontSize = 10.sp,
                                 fontWeight = FontWeight.Bold,
-                                color = Slate400,
+                                color = c.textMuted,
                                 letterSpacing = 0.5.sp
                             )
 
@@ -1615,10 +1677,10 @@ fun CustomerPdfExportSheet(
                                     val isSelected = selectedPreset == preset
                                     Surface(
                                         shape = RoundedCornerShape(6.dp),
-                                        color = if (isSelected) SecondaryBlue else Color.White,
+                                        color = if (isSelected) c.blueAccent else c.card,
                                         border = androidx.compose.foundation.BorderStroke(
                                             1.dp,
-                                            if (isSelected) SecondaryBlue else Slate200
+                                            if (isSelected) c.blueAccent else c.border
                                         ),
                                         modifier = Modifier.clickable {
                                             selectedPreset = preset
@@ -1715,7 +1777,7 @@ fun CustomerPdfExportSheet(
                                             text = preset,
                                             fontSize = 11.sp,
                                             fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
-                                            color = if (isSelected) Color.White else Slate700,
+                                            color = if (isSelected) Color.White else c.textSecondary,
                                             modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
                                         )
                                     }
@@ -1732,23 +1794,23 @@ fun CustomerPdfExportSheet(
                                 // From Date
                                 Surface(
                                     shape = RoundedCornerShape(8.dp),
-                                    color = Color.White,
-                                    border = androidx.compose.foundation.BorderStroke(1.dp, Slate300),
+                                    color = c.card,
+                                    border = androidx.compose.foundation.BorderStroke(1.dp, c.borderStrong),
                                     modifier = Modifier
                                         .weight(1f)
                                         .clickable { startDatePickerDialog.show() }
                                 ) {
                                     Column(modifier = Modifier.padding(10.dp)) {
-                                        Text("From Date", fontSize = 10.sp, color = Slate500, fontWeight = FontWeight.SemiBold)
+                                        Text("From Date", fontSize = 10.sp, color = c.textMuted, fontWeight = FontWeight.SemiBold)
                                         Spacer(modifier = Modifier.height(2.dp))
                                         Row(verticalAlignment = Alignment.CenterVertically) {
-                                            Icon(Icons.Default.CalendarToday, contentDescription = null, modifier = Modifier.size(13.dp), tint = SecondaryBlue)
+                                            Icon(Icons.Default.CalendarToday, contentDescription = null, modifier = Modifier.size(13.dp), tint = c.blueAccent)
                                             Spacer(modifier = Modifier.width(4.dp))
                                             Text(
                                                 text = sdfDay.format(Date(startDateMillis)),
                                                 fontSize = 12.sp,
                                                 fontWeight = FontWeight.Bold,
-                                                color = Slate900
+                                                color = c.textPrimary
                                             )
                                         }
                                     }
@@ -1757,23 +1819,23 @@ fun CustomerPdfExportSheet(
                                 // To Date
                                 Surface(
                                     shape = RoundedCornerShape(8.dp),
-                                    color = Color.White,
-                                    border = androidx.compose.foundation.BorderStroke(1.dp, Slate300),
+                                    color = c.card,
+                                    border = androidx.compose.foundation.BorderStroke(1.dp, c.borderStrong),
                                     modifier = Modifier
                                         .weight(1f)
                                         .clickable { endDatePickerDialog.show() }
                                 ) {
                                     Column(modifier = Modifier.padding(10.dp)) {
-                                        Text("To Date", fontSize = 10.sp, color = Slate500, fontWeight = FontWeight.SemiBold)
+                                        Text("To Date", fontSize = 10.sp, color = c.textMuted, fontWeight = FontWeight.SemiBold)
                                         Spacer(modifier = Modifier.height(2.dp))
                                         Row(verticalAlignment = Alignment.CenterVertically) {
-                                            Icon(Icons.Default.CalendarToday, contentDescription = null, modifier = Modifier.size(13.dp), tint = SecondaryBlue)
+                                            Icon(Icons.Default.CalendarToday, contentDescription = null, modifier = Modifier.size(13.dp), tint = c.blueAccent)
                                             Spacer(modifier = Modifier.width(4.dp))
                                             Text(
                                                 text = sdfDay.format(Date(endDateMillis)),
                                                 fontSize = 12.sp,
                                                 fontWeight = FontWeight.Bold,
-                                                color = Slate900
+                                                color = c.textPrimary
                                             )
                                         }
                                     }
@@ -1790,11 +1852,11 @@ fun CustomerPdfExportSheet(
             Card(
                 shape = RoundedCornerShape(12.dp),
                 colors = CardDefaults.cardColors(
-                    containerColor = if (filteredTransactions.isEmpty()) Color(0xFFFFFBEB) else Slate50
+                    containerColor = if (filteredTransactions.isEmpty()) c.amberTint else c.surfaceSubtle
                 ),
                 border = androidx.compose.foundation.BorderStroke(
                     1.dp,
-                    if (filteredTransactions.isEmpty()) Color(0xFFFDE68A) else Slate200
+                    if (filteredTransactions.isEmpty()) c.amberBorder else c.border
                 ),
                 modifier = Modifier.fillMaxWidth()
             ) {
@@ -1808,18 +1870,18 @@ fun CustomerPdfExportSheet(
                             text = "Report Period: $periodLabel",
                             fontSize = 12.sp,
                             fontWeight = FontWeight.Bold,
-                            color = Slate900
+                            color = c.textPrimary
                         )
 
                         Surface(
                             shape = RoundedCornerShape(12.dp),
-                            color = if (filteredTransactions.isEmpty()) Color(0xFFFEF3C7) else Slate200
+                            color = if (filteredTransactions.isEmpty()) c.amberTint else c.cardElevated
                         ) {
                             Text(
                                 text = "${filteredTransactions.size} entries",
                                 fontSize = 11.sp,
                                 fontWeight = FontWeight.Bold,
-                                color = if (filteredTransactions.isEmpty()) Color(0xFFB45309) else Slate700,
+                                color = if (filteredTransactions.isEmpty()) c.amberAccent else c.textSecondary,
                                 modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
                             )
                         }
@@ -1831,7 +1893,7 @@ fun CustomerPdfExportSheet(
                             Icon(
                                 Icons.Default.Info,
                                 contentDescription = null,
-                                tint = Color(0xFFD97706),
+                                tint = c.amberAccent,
                                 modifier = Modifier.size(16.dp)
                             )
                             Spacer(modifier = Modifier.width(6.dp))
@@ -1839,13 +1901,13 @@ fun CustomerPdfExportSheet(
                                 text = "No data available for the selected period",
                                 fontSize = 12.sp,
                                 fontWeight = FontWeight.SemiBold,
-                                color = Color(0xFFB45309)
+                                color = c.amberAccent
                             )
                         }
                         Text(
-                            text = "No records exist for $periodLabel. Exporting will generate a clean ledger with a clear \"No data available\" message.",
+                            text = "No records exist for $periodLabel. Please choose another date, month, or year to export.",
                             fontSize = 11.sp,
-                            color = Color(0xFF92400E),
+                            color = c.textSecondary,
                             modifier = Modifier.padding(top = 2.dp)
                         )
                     } else {
@@ -1855,22 +1917,22 @@ fun CustomerPdfExportSheet(
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
                             Column {
-                                Text("Total Received", fontSize = 10.sp, color = Slate500)
+                                Text("Total Received", fontSize = 10.sp, color = c.textMuted)
                                 Text(
                                     String.format("₹ %,.2f", filteredReceived),
                                     fontSize = 12.sp,
                                     fontWeight = FontWeight.Bold,
-                                    color = GreenPrimary
+                                    color = c.greenPrimary
                                 )
                             }
 
                             Column {
-                                Text("Total Paid", fontSize = 10.sp, color = Slate500)
+                                Text("Total Paid", fontSize = 10.sp, color = c.textMuted)
                                 Text(
                                     String.format("₹ %,.2f", filteredPaid),
                                     fontSize = 12.sp,
                                     fontWeight = FontWeight.Bold,
-                                    color = RedDebit
+                                    color = c.redDebit
                                 )
                             }
 
@@ -1878,13 +1940,13 @@ fun CustomerPdfExportSheet(
                                 Text(
                                     if (isDeductionCustomer) "Total Expense" else "Net Balance",
                                     fontSize = 10.sp,
-                                    color = Slate500
+                                    color = c.textMuted
                                 )
                                 Text(
                                     String.format("₹ %,.2f", Math.abs(filteredBalance)),
                                     fontSize = 12.sp,
                                     fontWeight = FontWeight.Bold,
-                                    color = if (isDeductionCustomer) RedDebit else if (filteredBalance >= 0) GreenPrimary else RedDebit
+                                    color = if (isDeductionCustomer) c.redDebit else if (filteredBalance >= 0) c.greenPrimary else c.redDebit
                                 )
                             }
                         }
@@ -1902,18 +1964,18 @@ fun CustomerPdfExportSheet(
                 OutlinedButton(
                     onClick = onDismiss,
                     shape = RoundedCornerShape(10.dp),
-                    border = androidx.compose.foundation.BorderStroke(1.dp, Slate300),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, c.borderStrong),
                     modifier = Modifier
                         .weight(1f)
                         .height(46.dp)
                 ) {
-                    Text("Cancel", color = Slate700, fontWeight = FontWeight.SemiBold)
+                    Text(s.cancel, color = c.textSecondary, fontWeight = FontWeight.SemiBold)
                 }
 
                 Button(
                     onClick = { exportPdf() },
                     shape = RoundedCornerShape(10.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = PrimaryNavy),
+                    colors = ButtonDefaults.buttonColors(containerColor = c.greenPrimary),
                     modifier = Modifier
                         .weight(2f)
                         .height(46.dp)
@@ -1926,7 +1988,7 @@ fun CustomerPdfExportSheet(
                     )
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
-                        text = if (filteredTransactions.isEmpty()) "Export PDF (0 entries)" else "Export PDF (${filteredTransactions.size})",
+                        text = if (filteredTransactions.isEmpty()) "Export PDF (0 entries)" else "${s.exportPdf} (${filteredTransactions.size})",
                         fontWeight = FontWeight.Bold,
                         color = Color.White
                     )

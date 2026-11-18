@@ -42,19 +42,35 @@ interface CustomerDao {
 
     @Delete
     suspend fun deleteCustomer(customer: CustomerEntity)
-
-    @Query("DELETE FROM customers WHERE id = :id")
-    suspend fun deleteCustomerById(id: Long)
-
-    @Query("SELECT * FROM customers WHERE name LIKE '%' || :query || '%' OR mobileNumber LIKE '%' || :query || '%' ORDER BY name ASC")
-    fun searchCustomers(query: String): Flow<List<CustomerEntity>>
-
-    @Query("SELECT * FROM customers ORDER BY lastUpdatedTimestamp DESC, id DESC")
-    fun getCustomersPaged(): PagingSource<Int, CustomerEntity>
-
-    @Query("SELECT * FROM customers WHERE name LIKE '%' || :query || '%' OR mobileNumber LIKE '%' || :query || '%' ORDER BY name ASC")
-    fun searchCustomersPaged(query: String): PagingSource<Int, CustomerEntity>
 }
+
+data class SummaryPeriodTotalsTuple(
+    val totalPaid: Double,
+    val totalReceived: Double,
+    val entryCount: Int,
+    val customerCount: Int
+)
+
+data class SummaryChartBucketTuple(
+    val bucketKey: String,
+    val totalPaid: Double,
+    val totalReceived: Double,
+    val entryCount: Int
+)
+
+data class SummaryTransactionTuple(
+    val id: Long,
+    val customerId: Long,
+    val customerName: String,
+    val transactionType: String,
+    val amount: Double,
+    val comment: String,
+    val category: String,
+    val paymentMode: String,
+    val dateTimestamp: Long,
+    val attachmentPath: String?,
+    val status: String
+)
 
 @Dao
 interface TransactionDao {
@@ -73,8 +89,85 @@ interface TransactionDao {
     @Query("SELECT * FROM transactions WHERE customerId = :customerId ORDER BY dateTimestamp DESC, id DESC")
     fun getTransactionsForCustomerPaged(customerId: Long): PagingSource<Int, TransactionEntity>
 
-    @Query("SELECT * FROM transactions ORDER BY dateTimestamp DESC, id DESC")
-    fun getAllTransactionsPaged(): PagingSource<Int, TransactionEntity>
+    @Query(
+        """
+        SELECT
+            COALESCE(SUM(CASE WHEN transactionType = 'I_PAID' THEN amount ELSE 0 END), 0.0) AS totalPaid,
+            COALESCE(SUM(CASE WHEN transactionType = 'I_RECEIVED' THEN amount ELSE 0 END), 0.0) AS totalReceived,
+            COUNT(*) AS entryCount,
+            COUNT(DISTINCT customerId) AS customerCount
+        FROM transactions
+        WHERE dateTimestamp >= :startMillis AND dateTimestamp < :endMillis
+        """
+    )
+    fun observeSummaryPeriodTotals(startMillis: Long, endMillis: Long): Flow<SummaryPeriodTotalsTuple>
+
+    @Query(
+        """
+        SELECT
+            strftime('%Y-%m-%d', dateTimestamp / 1000, 'unixepoch', 'localtime') AS bucketKey,
+            COALESCE(SUM(CASE WHEN transactionType = 'I_PAID' THEN amount ELSE 0 END), 0.0) AS totalPaid,
+            COALESCE(SUM(CASE WHEN transactionType = 'I_RECEIVED' THEN amount ELSE 0 END), 0.0) AS totalReceived,
+            COUNT(*) AS entryCount
+        FROM transactions
+        WHERE dateTimestamp >= :startMillis AND dateTimestamp < :endMillis
+        GROUP BY bucketKey
+        ORDER BY bucketKey ASC
+        """
+    )
+    fun observeDailyBuckets(startMillis: Long, endMillis: Long): Flow<List<SummaryChartBucketTuple>>
+
+    @Query(
+        """
+        SELECT
+            strftime('%Y-%m', dateTimestamp / 1000, 'unixepoch', 'localtime') AS bucketKey,
+            COALESCE(SUM(CASE WHEN transactionType = 'I_PAID' THEN amount ELSE 0 END), 0.0) AS totalPaid,
+            COALESCE(SUM(CASE WHEN transactionType = 'I_RECEIVED' THEN amount ELSE 0 END), 0.0) AS totalReceived,
+            COUNT(*) AS entryCount
+        FROM transactions
+        WHERE dateTimestamp >= :startMillis AND dateTimestamp < :endMillis
+        GROUP BY bucketKey
+        ORDER BY bucketKey ASC
+        """
+    )
+    fun observeMonthlyBuckets(startMillis: Long, endMillis: Long): Flow<List<SummaryChartBucketTuple>>
+
+    @Query(
+        """
+        SELECT
+            strftime('%Y', dateTimestamp / 1000, 'unixepoch', 'localtime') AS bucketKey,
+            COALESCE(SUM(CASE WHEN transactionType = 'I_PAID' THEN amount ELSE 0 END), 0.0) AS totalPaid,
+            COALESCE(SUM(CASE WHEN transactionType = 'I_RECEIVED' THEN amount ELSE 0 END), 0.0) AS totalReceived,
+            COUNT(*) AS entryCount
+        FROM transactions
+        WHERE dateTimestamp >= :startMillis AND dateTimestamp < :endMillis
+        GROUP BY bucketKey
+        ORDER BY bucketKey ASC
+        """
+    )
+    fun observeYearlyBuckets(startMillis: Long, endMillis: Long): Flow<List<SummaryChartBucketTuple>>
+
+    @Query(
+        """
+        SELECT
+            t.id AS id,
+            t.customerId AS customerId,
+            COALESCE(c.name, 'Customer') AS customerName,
+            t.transactionType AS transactionType,
+            t.amount AS amount,
+            t.comment AS comment,
+            t.category AS category,
+            t.paymentMode AS paymentMode,
+            t.dateTimestamp AS dateTimestamp,
+            t.attachmentPath AS attachmentPath,
+            t.status AS status
+        FROM transactions t
+        LEFT JOIN customers c ON t.customerId = c.id
+        WHERE t.dateTimestamp >= :startMillis AND t.dateTimestamp < :endMillis
+        ORDER BY t.dateTimestamp DESC, t.id DESC
+        """
+    )
+    fun getSummaryTransactionsPaged(startMillis: Long, endMillis: Long): PagingSource<Int, SummaryTransactionTuple>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertTransaction(transaction: TransactionEntity): Long
@@ -87,15 +180,6 @@ interface TransactionDao {
 
     @Delete
     suspend fun deleteTransaction(transaction: TransactionEntity)
-
-    @Query("DELETE FROM transactions WHERE id = :id")
-    suspend fun deleteTransactionById(id: Long)
-
-    @Query("SELECT SUM(amount) FROM transactions WHERE customerId = :customerId AND transactionType = 'I_PAID'")
-    fun getTotalPaidForCustomer(customerId: Long): Flow<Double?>
-
-    @Query("SELECT SUM(amount) FROM transactions WHERE customerId = :customerId AND transactionType = 'I_RECEIVED'")
-    fun getTotalReceivedForCustomer(customerId: Long): Flow<Double?>
 }
 
 @Dao
@@ -105,9 +189,6 @@ interface MonthlyExpenseDao {
 
     @Query("SELECT * FROM monthly_expenses ORDER BY dateTimestamp DESC")
     fun getAllExpenses(): Flow<List<MonthlyExpenseEntity>>
-
-    @Query("SELECT * FROM monthly_expenses WHERE monthYear = :monthYear ORDER BY dateTimestamp DESC")
-    fun getExpensesByMonth(monthYear: String): Flow<List<MonthlyExpenseEntity>>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertExpense(expense: MonthlyExpenseEntity): Long
@@ -126,7 +207,4 @@ interface CategoryDao {
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertCategory(category: CategoryEntity): Long
-
-    @Query("DELETE FROM categories WHERE id = :id AND isCustom = 1")
-    suspend fun deleteCustomCategory(id: Long)
 }

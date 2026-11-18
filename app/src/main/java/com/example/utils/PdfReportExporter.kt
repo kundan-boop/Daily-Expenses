@@ -13,7 +13,128 @@ import java.io.FileOutputStream
 import java.text.SimpleDateFormat
 import java.util.*
 
+enum class PdfDateFilterMode(val label: String) {
+    ALL("All Dates"),
+    SPECIFIC_MONTH("Month"),
+    DATE_RANGE("Date Range"),
+    SPECIFIC_YEAR("Year")
+}
+
+data class FilteredLedgerPeriod(
+    val transactions: List<TransactionEntity>,
+    val periodLabel: String
+)
+
 object PdfReportExporter {
+
+    private val MONTH_NAMES = listOf(
+        "January", "February", "March", "April", "May", "June",
+        "July", "August", "September", "October", "November", "December"
+    )
+
+    fun filterTransactionsForPeriod(
+        transactions: List<TransactionEntity>,
+        filterMode: PdfDateFilterMode,
+        selectedMonth: Int = 0,
+        selectedMonthYear: Int = 2026,
+        selectedYearOnly: Int = 2026,
+        startDateMillis: Long = 0L,
+        endDateMillis: Long = 0L,
+        locale: Locale = Locale.getDefault()
+    ): FilteredLedgerPeriod {
+        return when (filterMode) {
+            PdfDateFilterMode.ALL -> {
+                FilteredLedgerPeriod(transactions, "All Available Dates")
+            }
+            PdfDateFilterMode.SPECIFIC_MONTH -> {
+                val safeMonth = selectedMonth.coerceIn(0, 11)
+                val startCal = Calendar.getInstance().apply {
+                    set(Calendar.YEAR, selectedMonthYear)
+                    set(Calendar.MONTH, safeMonth)
+                    set(Calendar.DAY_OF_MONTH, 1)
+                    set(Calendar.HOUR_OF_DAY, 0)
+                    set(Calendar.MINUTE, 0)
+                    set(Calendar.SECOND, 0)
+                    set(Calendar.MILLISECOND, 0)
+                }
+                val endCal = Calendar.getInstance().apply {
+                    set(Calendar.YEAR, selectedMonthYear)
+                    set(Calendar.MONTH, safeMonth)
+                    set(Calendar.DAY_OF_MONTH, getActualMaximum(Calendar.DAY_OF_MONTH))
+                    set(Calendar.HOUR_OF_DAY, 23)
+                    set(Calendar.MINUTE, 59)
+                    set(Calendar.SECOND, 59)
+                    set(Calendar.MILLISECOND, 999)
+                }
+                val label = "${MONTH_NAMES[safeMonth]} $selectedMonthYear"
+                val filtered = transactions.filter { it.dateTimestamp in startCal.timeInMillis..endCal.timeInMillis }
+                FilteredLedgerPeriod(filtered, label)
+            }
+            PdfDateFilterMode.SPECIFIC_YEAR -> {
+                val startCal = Calendar.getInstance().apply {
+                    set(Calendar.YEAR, selectedYearOnly)
+                    set(Calendar.MONTH, 0)
+                    set(Calendar.DAY_OF_MONTH, 1)
+                    set(Calendar.HOUR_OF_DAY, 0)
+                    set(Calendar.MINUTE, 0)
+                    set(Calendar.SECOND, 0)
+                    set(Calendar.MILLISECOND, 0)
+                }
+                val endCal = Calendar.getInstance().apply {
+                    set(Calendar.YEAR, selectedYearOnly)
+                    set(Calendar.MONTH, 11)
+                    set(Calendar.DAY_OF_MONTH, 31)
+                    set(Calendar.HOUR_OF_DAY, 23)
+                    set(Calendar.MINUTE, 59)
+                    set(Calendar.SECOND, 59)
+                    set(Calendar.MILLISECOND, 999)
+                }
+                val label = "Year $selectedYearOnly"
+                val filtered = transactions.filter { it.dateTimestamp in startCal.timeInMillis..endCal.timeInMillis }
+                FilteredLedgerPeriod(filtered, label)
+            }
+            PdfDateFilterMode.DATE_RANGE -> {
+                val rawStart = minOf(startDateMillis, endDateMillis)
+                val rawEnd = maxOf(startDateMillis, endDateMillis)
+                val startCal = Calendar.getInstance().apply {
+                    timeInMillis = rawStart
+                    set(Calendar.HOUR_OF_DAY, 0)
+                    set(Calendar.MINUTE, 0)
+                    set(Calendar.SECOND, 0)
+                    set(Calendar.MILLISECOND, 0)
+                }
+                val endCal = Calendar.getInstance().apply {
+                    timeInMillis = rawEnd
+                    set(Calendar.HOUR_OF_DAY, 23)
+                    set(Calendar.MINUTE, 59)
+                    set(Calendar.SECOND, 59)
+                    set(Calendar.MILLISECOND, 999)
+                }
+                val sdfDay = SimpleDateFormat("dd MMM yyyy", locale)
+                val isSameDay = sdfDay.format(startCal.time) == sdfDay.format(endCal.time)
+                val label = if (isSameDay) sdfDay.format(startCal.time) else "${sdfDay.format(startCal.time)} – ${sdfDay.format(endCal.time)}"
+                val filtered = transactions.filter { it.dateTimestamp in startCal.timeInMillis..endCal.timeInMillis }
+                FilteredLedgerPeriod(filtered, label)
+            }
+        }
+    }
+
+    fun computeRunningTotals(transactions: List<TransactionEntity>): Map<Long, Double> {
+        val sorted = transactions.sortedWith(
+            compareBy<TransactionEntity> { it.dateTimestamp }.thenBy { it.id }
+        )
+        val map = HashMap<Long, Double>(sorted.size)
+        var currentBalance = 0.0
+        for (tx in sorted) {
+            if (tx.transactionType == "I_PAID") {
+                currentBalance += tx.amount
+            } else {
+                currentBalance -= tx.amount
+            }
+            map[tx.id] = currentBalance
+        }
+        return map
+    }
 
     private fun wrapText(text: String, paint: Paint, maxWidth: Float): List<String> {
         if (text.isBlank()) return listOf("None")

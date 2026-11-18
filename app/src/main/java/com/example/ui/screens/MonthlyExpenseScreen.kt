@@ -19,6 +19,7 @@ import androidx.compose.material.icons.automirrored.filled.*
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -26,23 +27,31 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import com.example.data.MonthlyExpenseEntity
 import com.example.ui.DailyExpenseViewModel
 import com.example.ui.theme.*
+import com.example.utils.ImageUtils
+import com.example.utils.LocalAppStrings
 import java.text.SimpleDateFormat
 import java.util.*
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun MonthlyExpenseScreen(
-    viewModel: DailyExpenseViewModel
+    viewModel: DailyExpenseViewModel,
+    onOpenMenu: (() -> Unit)? = null
 ) {
-    val allExpenses by viewModel.allExpenses.collectAsState()
+    val c = LedgerTheme.colors
+    val s = LocalAppStrings.current
+    val allExpenses by viewModel.allExpenses.collectAsStateWithLifecycle()
 
     var showAddDialog by remember { mutableStateOf(false) }
     var expenseToEdit by remember { mutableStateOf<MonthlyExpenseEntity?>(null) }
@@ -103,30 +112,31 @@ fun MonthlyExpenseScreen(
 
     Scaffold(
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
+        containerColor = c.background,
         floatingActionButton = {
             ExtendedFloatingActionButton(
                 onClick = {
                     expenseToEdit = null
                     showAddDialog = true
                 },
-                icon = { Icon(Icons.Default.Add, contentDescription = "Add Expense", tint = Color.White) },
-                text = { Text("Add Expense", fontWeight = FontWeight.Bold, color = Color.White) },
-                containerColor = GreenPrimary,
+                icon = { Icon(Icons.Default.Add, contentDescription = s.addExpense, tint = Color.White) },
+                text = { Text(s.addExpense, fontWeight = FontWeight.Bold, color = Color.White) },
+                containerColor = c.greenPrimary,
                 modifier = Modifier
                     .navigationBarsPadding()
                     .testTag("add_expense_fab")
             )
         }
-    ) { innerPadding ->
+    ) { _ ->
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .background(SurfaceBackground)
+                .background(c.background)
         ) {
             // Header Card
             Card(
                 shape = RoundedCornerShape(bottomStart = 20.dp, bottomEnd = 20.dp),
-                colors = CardDefaults.cardColors(containerColor = GreenPrimary),
+                colors = CardDefaults.cardColors(containerColor = c.brandHeader),
                 elevation = CardDefaults.cardElevation(defaultElevation = 3.dp),
                 modifier = Modifier.fillMaxWidth()
             ) {
@@ -136,25 +146,43 @@ fun MonthlyExpenseScreen(
                         .statusBarsPadding()
                         .padding(16.dp)
                 ) {
-                    Text(
-                        text = "Monthly Store & Personal Deductions",
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Medium,
-                        color = Color.White.copy(alpha = 0.85f)
-                    )
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        if (onOpenMenu != null) {
+                            IconButton(
+                                onClick = onOpenMenu,
+                                modifier = Modifier.size(48.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Menu,
+                                    contentDescription = "Open Menu",
+                                    tint = Color.White,
+                                    modifier = Modifier.size(24.dp)
+                                )
+                            }
+                        }
+                        Text(
+                            text = "Monthly Store & Personal Deductions",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = Color.White.copy(alpha = 0.85f)
+                        )
+                    }
 
                     Spacer(modifier = Modifier.height(4.dp))
 
-                    Row(
+                    FlowRow(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         Text(
-                            text = "Monthly Expenses",
+                            text = s.monthlyExpenses,
                             fontSize = 20.sp,
                             fontWeight = FontWeight.ExtraBold,
-                            color = Color.White
+                            color = Color.White,
+                            modifier = Modifier.align(Alignment.CenterVertically)
                         )
 
                         // Interactive Month Navigator Row
@@ -218,7 +246,7 @@ fun MonthlyExpenseScreen(
 
                     Card(
                         shape = RoundedCornerShape(14.dp),
-                        colors = CardDefaults.cardColors(containerColor = Color.White),
+                        colors = CardDefaults.cardColors(containerColor = c.card),
                         elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
                         modifier = Modifier.fillMaxWidth()
                     ) {
@@ -230,23 +258,23 @@ fun MonthlyExpenseScreen(
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Column {
-                                Text("TOTAL DEDUCTIONS", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Slate500, letterSpacing = 0.5.sp)
+                                Text(s.totalSpent.uppercase(), fontSize = 10.sp, fontWeight = FontWeight.Bold, color = c.textMuted, letterSpacing = 0.5.sp)
                                 Text(
                                     text = String.format("₹ %,.2f", totalMonthExpense),
                                     fontSize = 22.sp,
                                     fontWeight = FontWeight.ExtraBold,
-                                    color = RedDebit
+                                    color = c.redDebit
                                 )
                             }
 
                             Surface(
                                 shape = CircleShape,
-                                color = RedLight
+                                color = c.redTint
                             ) {
                                 Icon(
                                     Icons.AutoMirrored.Filled.TrendingDown,
                                     contentDescription = null,
-                                    tint = RedDebit,
+                                    tint = c.redDebit,
                                     modifier = Modifier.padding(8.dp)
                                 )
                             }
@@ -261,7 +289,7 @@ fun MonthlyExpenseScreen(
                 text = "Expense Records (${formatMonthYear(selectedMonth)})",
                 fontSize = 15.sp,
                 fontWeight = FontWeight.ExtraBold,
-                color = Slate900,
+                color = c.textPrimary,
                 modifier = Modifier.padding(horizontal = 16.dp)
             )
 
@@ -278,21 +306,21 @@ fun MonthlyExpenseScreen(
                         Icon(
                             Icons.AutoMirrored.Filled.ReceiptLong,
                             contentDescription = null,
-                            tint = Slate400,
+                            tint = c.textMuted,
                             modifier = Modifier.size(52.dp)
                         )
                         Spacer(modifier = Modifier.height(10.dp))
                         Text(
-                            text = "No expenses logged for ${formatMonthYear(selectedMonth)}",
+                            text = "${s.noExpensesMonth} (${formatMonthYear(selectedMonth)})",
                             fontSize = 14.sp,
                             fontWeight = FontWeight.Bold,
-                            color = Slate700
+                            color = c.textSecondary
                         )
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(
-                            text = "Tap '+ Add Expense' to record fuel, rent, bills, or salary",
+                            text = "Tap '+ ${s.addExpense}' to record fuel, rent, bills, or salary",
                             fontSize = 12.sp,
-                            color = Slate500
+                            color = c.textMuted
                         )
                     }
                 }
@@ -305,7 +333,8 @@ fun MonthlyExpenseScreen(
                     items(currentMonthExpenses, key = { it.id }) { expense ->
                         Card(
                             shape = RoundedCornerShape(14.dp),
-                            colors = CardDefaults.cardColors(containerColor = Color.White),
+                            colors = CardDefaults.cardColors(containerColor = c.card),
+                            border = androidx.compose.foundation.BorderStroke(1.dp, c.border),
                             elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
                             modifier = Modifier.fillMaxWidth()
                         ) {
@@ -319,7 +348,7 @@ fun MonthlyExpenseScreen(
                                     modifier = Modifier
                                         .size(42.dp)
                                         .clip(CircleShape)
-                                        .background(RedLight),
+                                        .background(c.redTint),
                                     contentAlignment = Alignment.Center
                                 ) {
                                     Icon(
@@ -332,7 +361,7 @@ fun MonthlyExpenseScreen(
                                             else -> Icons.Default.Payments
                                         },
                                         contentDescription = null,
-                                        tint = RedDebit,
+                                        tint = c.redDebit,
                                         modifier = Modifier.size(22.dp)
                                     )
                                 }
@@ -344,13 +373,13 @@ fun MonthlyExpenseScreen(
                                         text = expense.title,
                                         fontSize = 15.sp,
                                         fontWeight = FontWeight.ExtraBold,
-                                        color = Slate900
+                                        color = c.textPrimary
                                     )
                                     Spacer(modifier = Modifier.height(2.dp))
                                     Text(
                                         text = if (expense.notes.isNotBlank()) "${expense.category} • ${expense.notes}" else expense.category,
                                         fontSize = 12.sp,
-                                        color = Slate500
+                                        color = c.textMuted
                                     )
                                     if (expense.attachmentPath != null) {
                                         Spacer(modifier = Modifier.height(2.dp))
@@ -358,14 +387,14 @@ fun MonthlyExpenseScreen(
                                             Icon(
                                                 Icons.Default.AttachFile,
                                                 contentDescription = null,
-                                                tint = GreenPrimary,
+                                                tint = c.greenPrimary,
                                                 modifier = Modifier.size(12.dp)
                                             )
                                             Spacer(modifier = Modifier.width(2.dp))
                                             Text(
                                                 "Bill Attached",
                                                 fontSize = 11.sp,
-                                                color = GreenPrimary,
+                                                color = c.greenPrimary,
                                                 fontWeight = FontWeight.Bold
                                             )
                                         }
@@ -377,7 +406,7 @@ fun MonthlyExpenseScreen(
                                         text = String.format("₹ %,.0f", expense.amount),
                                         fontSize = 16.sp,
                                         fontWeight = FontWeight.ExtraBold,
-                                        color = RedDebit
+                                        color = c.redDebit
                                     )
 
                                     Row {
@@ -386,12 +415,14 @@ fun MonthlyExpenseScreen(
                                                 expenseToEdit = expense
                                                 showAddDialog = true
                                             },
-                                            modifier = Modifier.size(28.dp)
+                                            modifier = Modifier
+                                                .size(36.dp)
+                                                .minimumInteractiveComponentSize()
                                         ) {
                                             Icon(
                                                 Icons.Default.Edit,
                                                 contentDescription = "Edit",
-                                                tint = SecondaryBlue,
+                                                tint = c.blueAccent,
                                                 modifier = Modifier.size(18.dp)
                                             )
                                         }
@@ -401,12 +432,14 @@ fun MonthlyExpenseScreen(
                                                 expenseToDelete = expense
                                                 showDeleteConfirmDialog = true
                                             },
-                                            modifier = Modifier.size(28.dp)
+                                            modifier = Modifier
+                                                .size(36.dp)
+                                                .minimumInteractiveComponentSize()
                                         ) {
                                             Icon(
                                                 Icons.Default.Delete,
                                                 contentDescription = "Delete",
-                                                tint = Slate400,
+                                                tint = c.textMuted,
                                                 modifier = Modifier.size(18.dp)
                                             )
                                         }
@@ -445,23 +478,25 @@ fun MonthlyExpenseScreen(
             uri?.let { attachmentUri = it.toString() }
         }
 
-        val keyboardController = LocalSoftwareKeyboardController.current
-        val focusManager = LocalFocusManager.current
-        val isImeVisible = WindowInsets.isImeVisible
-
-        BackHandler(enabled = isImeVisible) {
-            keyboardController?.hide()
-            focusManager.clearFocus()
-        }
+        var dialogViewRef by remember { mutableStateOf<android.view.View?>(null) }
+        var lastImeCloseTime by remember { mutableLongStateOf(0L) }
 
         AlertDialog(
             onDismissRequest = {
-                showAddDialog = false
-                expenseToEdit = null
+                val liveIme = dialogViewRef?.let {
+                    ViewCompat.getRootWindowInsets(it)?.isVisible(WindowInsetsCompat.Type.ime())
+                } == true
+                if (!liveIme && System.currentTimeMillis() - lastImeCloseTime > 300L) {
+                    showAddDialog = false
+                    expenseToEdit = null
+                }
             },
-            containerColor = Color.White,
+            containerColor = c.card,
             shape = RoundedCornerShape(20.dp),
-            properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false),
+            properties = androidx.compose.ui.window.DialogProperties(
+                usePlatformDefaultWidth = false,
+                dismissOnBackPress = false
+            ),
             modifier = Modifier
                 .fillMaxWidth()
                 .widthIn(max = 520.dp)
@@ -469,16 +504,38 @@ fun MonthlyExpenseScreen(
                 .padding(horizontal = 15.dp),
             title = {
                 Text(
-                    text = if (currentEdit == null) "Add Monthly Expense" else "Edit Expense Entry",
+                    text = if (currentEdit == null) s.addExpense else "Edit Expense Entry",
                     fontSize = 18.sp,
                     fontWeight = FontWeight.Bold,
-                    color = Slate900
+                    color = c.textPrimary
                 )
             },
             text = {
-                BackHandler(enabled = isImeVisible) {
-                    keyboardController?.hide()
-                    focusManager.clearFocus()
+                val dialogView = LocalView.current
+                val keyboardController = LocalSoftwareKeyboardController.current
+                val focusManager = LocalFocusManager.current
+                val isImeVisible = WindowInsets.isImeVisible
+                var prevIme by remember { mutableStateOf(false) }
+
+                LaunchedEffect(dialogView) { dialogViewRef = dialogView }
+                LaunchedEffect(isImeVisible) {
+                    if (prevIme && !isImeVisible) {
+                        lastImeCloseTime = System.currentTimeMillis()
+                    }
+                    prevIme = isImeVisible
+                }
+
+                BackHandler(enabled = true) {
+                    val liveIme = isImeVisible ||
+                        (ViewCompat.getRootWindowInsets(dialogView)?.isVisible(WindowInsetsCompat.Type.ime()) == true)
+                    if (liveIme) {
+                        lastImeCloseTime = System.currentTimeMillis()
+                        keyboardController?.hide()
+                        focusManager.clearFocus()
+                    } else if (System.currentTimeMillis() - lastImeCloseTime > 300L) {
+                        showAddDialog = false
+                        expenseToEdit = null
+                    }
                 }
                 Column(
                     modifier = Modifier.verticalScroll(rememberScrollState()),
@@ -487,22 +544,20 @@ fun MonthlyExpenseScreen(
                     // Title Field
                     OutlinedTextField(
                         value = title,
-                        onValueChange = {
-                            title = it
-                        },
-                        label = { Text("Expense Title *", color = if (isTitleError) RedDebit else Slate700) },
-                        placeholder = { Text("e.g. Shop Rent, Fuel, Tea", color = Slate400) },
+                        onValueChange = { title = it },
+                        label = { Text("Expense Title *", color = if (isTitleError) c.redDebit else c.textSecondary) },
+                        placeholder = { Text("e.g. Shop Rent, Fuel, Tea", color = c.textMuted) },
                         isError = isTitleError,
                         singleLine = true,
-                        textStyle = LocalTextStyle.current.copy(color = Slate900, fontSize = 14.sp),
+                        textStyle = LocalTextStyle.current.copy(color = c.textPrimary, fontSize = 14.sp),
                         colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = GreenPrimary,
-                            unfocusedBorderColor = Slate400,
-                            errorBorderColor = RedDebit,
-                            focusedTextColor = Slate900,
-                            unfocusedTextColor = Slate900,
-                            focusedContainerColor = SurfaceBackground,
-                            unfocusedContainerColor = SurfaceBackground
+                            focusedBorderColor = c.greenPrimary,
+                            unfocusedBorderColor = c.borderStrong,
+                            errorBorderColor = c.redDebit,
+                            focusedTextColor = c.textPrimary,
+                            unfocusedTextColor = c.textPrimary,
+                            focusedContainerColor = c.surfaceSubtle,
+                            unfocusedContainerColor = c.surfaceSubtle
                         ),
                         modifier = Modifier.fillMaxWidth(),
                         shape = RoundedCornerShape(12.dp)
@@ -511,24 +566,22 @@ fun MonthlyExpenseScreen(
                     // Amount Field
                     OutlinedTextField(
                         value = amountText,
-                        onValueChange = {
-                            amountText = it
-                        },
-                        label = { Text("Amount (₹) *", color = if (isAmountError) RedDebit else Slate700) },
-                        placeholder = { Text("0", color = Slate400) },
-                        prefix = { Text("₹ ", fontWeight = FontWeight.Bold, color = RedDebit) },
+                        onValueChange = { amountText = it },
+                        label = { Text("Amount (₹) *", color = if (isAmountError) c.redDebit else c.textSecondary) },
+                        placeholder = { Text("0", color = c.textMuted) },
+                        prefix = { Text("₹ ", fontWeight = FontWeight.Bold, color = c.redDebit) },
                         isError = isAmountError,
                         singleLine = true,
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                        textStyle = LocalTextStyle.current.copy(color = RedDebit, fontSize = 16.sp, fontWeight = FontWeight.ExtraBold),
+                        textStyle = LocalTextStyle.current.copy(color = c.redDebit, fontSize = 16.sp, fontWeight = FontWeight.ExtraBold),
                         colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = RedDebit,
-                            unfocusedBorderColor = Slate400,
-                            errorBorderColor = RedDebit,
-                            focusedTextColor = RedDebit,
-                            unfocusedTextColor = RedDebit,
-                            focusedContainerColor = SurfaceBackground,
-                            unfocusedContainerColor = SurfaceBackground
+                            focusedBorderColor = c.redDebit,
+                            unfocusedBorderColor = c.borderStrong,
+                            errorBorderColor = c.redDebit,
+                            focusedTextColor = c.redDebit,
+                            unfocusedTextColor = c.redDebit,
+                            focusedContainerColor = c.surfaceSubtle,
+                            unfocusedContainerColor = c.surfaceSubtle
                         ),
                         modifier = Modifier.fillMaxWidth(),
                         shape = RoundedCornerShape(12.dp)
@@ -538,17 +591,17 @@ fun MonthlyExpenseScreen(
                     OutlinedTextField(
                         value = category,
                         onValueChange = { category = it },
-                        label = { Text("Category (Optional)", color = Slate700) },
-                        placeholder = { Text("e.g. Fuel, Rent, Utility", color = Slate400) },
+                        label = { Text("Category (Optional)", color = c.textSecondary) },
+                        placeholder = { Text("e.g. Fuel, Rent, Utility", color = c.textMuted) },
                         singleLine = true,
-                        textStyle = LocalTextStyle.current.copy(color = Slate900, fontSize = 14.sp),
+                        textStyle = LocalTextStyle.current.copy(color = c.textPrimary, fontSize = 14.sp),
                         colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = GreenPrimary,
-                            unfocusedBorderColor = Slate400,
-                            focusedTextColor = Slate900,
-                            unfocusedTextColor = Slate900,
-                            focusedContainerColor = SurfaceBackground,
-                            unfocusedContainerColor = SurfaceBackground
+                            focusedBorderColor = c.greenPrimary,
+                            unfocusedBorderColor = c.borderStrong,
+                            focusedTextColor = c.textPrimary,
+                            unfocusedTextColor = c.textPrimary,
+                            focusedContainerColor = c.surfaceSubtle,
+                            unfocusedContainerColor = c.surfaceSubtle
                         ),
                         modifier = Modifier.fillMaxWidth(),
                         shape = RoundedCornerShape(12.dp)
@@ -558,16 +611,16 @@ fun MonthlyExpenseScreen(
                     OutlinedTextField(
                         value = notes,
                         onValueChange = { notes = it },
-                        label = { Text("Notes / Remarks (Optional)", color = Slate700) },
-                        placeholder = { Text("e.g. Paid via PhonePe", color = Slate400) },
-                        textStyle = LocalTextStyle.current.copy(color = Slate900, fontSize = 14.sp),
+                        label = { Text("Notes / Remarks (Optional)", color = c.textSecondary) },
+                        placeholder = { Text("e.g. Paid via PhonePe", color = c.textMuted) },
+                        textStyle = LocalTextStyle.current.copy(color = c.textPrimary, fontSize = 14.sp),
                         colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = GreenPrimary,
-                            unfocusedBorderColor = Slate400,
-                            focusedTextColor = Slate900,
-                            unfocusedTextColor = Slate900,
-                            focusedContainerColor = SurfaceBackground,
-                            unfocusedContainerColor = SurfaceBackground
+                            focusedBorderColor = c.greenPrimary,
+                            unfocusedBorderColor = c.borderStrong,
+                            focusedTextColor = c.textPrimary,
+                            unfocusedTextColor = c.textPrimary,
+                            focusedContainerColor = c.surfaceSubtle,
+                            unfocusedContainerColor = c.surfaceSubtle
                         ),
                         modifier = Modifier.fillMaxWidth(),
                         shape = RoundedCornerShape(12.dp)
@@ -578,18 +631,18 @@ fun MonthlyExpenseScreen(
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .background(GreenLight, shape = RoundedCornerShape(12.dp))
+                                .background(c.greenTint, shape = RoundedCornerShape(12.dp))
                                 .padding(horizontal = 12.dp, vertical = 8.dp),
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
-                                Icon(Icons.Default.Image, contentDescription = null, tint = GreenPrimary)
+                                Icon(Icons.Default.Image, contentDescription = null, tint = c.greenPrimary)
                                 Spacer(modifier = Modifier.width(8.dp))
-                                Text("Bill / Receipt Attached", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = GreenPrimary)
+                                Text("Bill / Receipt Attached", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = c.greenPrimary)
                             }
                             TextButton(onClick = { attachmentUri = null }) {
-                                Text("Remove", color = RedDebit, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                Text(s.remove, color = c.redDebit, fontSize = 11.sp, fontWeight = FontWeight.Bold)
                             }
                         }
                     } else {
@@ -599,14 +652,15 @@ fun MonthlyExpenseScreen(
                                 .fillMaxWidth()
                                 .height(44.dp),
                             shape = RoundedCornerShape(12.dp),
+                            border = androidx.compose.foundation.BorderStroke(1.dp, c.borderStrong),
                             colors = ButtonDefaults.outlinedButtonColors(
-                                containerColor = SurfaceBackground,
-                                contentColor = SecondaryBlue
+                                containerColor = c.surfaceSubtle,
+                                contentColor = c.blueAccent
                             )
                         ) {
-                            Icon(Icons.Default.AddAPhoto, contentDescription = null, tint = SecondaryBlue, modifier = Modifier.size(18.dp))
+                            Icon(Icons.Default.AddAPhoto, contentDescription = null, tint = c.blueAccent, modifier = Modifier.size(18.dp))
                             Spacer(modifier = Modifier.width(8.dp))
-                            Text("Attach Bill / Receipt Photo", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Slate700)
+                            Text("Attach Bill / Receipt Photo", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = c.textSecondary)
                         }
                     }
                 }
@@ -617,22 +671,16 @@ fun MonthlyExpenseScreen(
                         attemptedSave = true
                         val amount = amountText.toDoubleOrNull() ?: 0.0
                         if (title.isNotBlank() && amount > 0) {
-                            val savedAttachmentPath = if (attachmentUri?.startsWith("content://") == true) {
-                                try {
-                                    val uri = android.net.Uri.parse(attachmentUri)
-                                    val bytes = dialogContext.contentResolver.openInputStream(uri)?.use { it.readBytes() }
-                                    if (bytes != null && bytes.isNotEmpty()) {
-                                        val dir = java.io.File(dialogContext.filesDir, "attachments")
-                                        if (!dir.exists()) dir.mkdirs()
-                                        val destFile = java.io.File(dir, "expense_${System.currentTimeMillis()}_${java.util.UUID.randomUUID().toString().take(8)}.jpg")
-                                        destFile.writeBytes(bytes)
-                                        destFile.absolutePath
-                                    } else attachmentUri
-                                } catch (e: Exception) {
-                                    e.printStackTrace()
-                                    attachmentUri
-                                }
-                            } else attachmentUri
+                            val currentAttachment = attachmentUri
+                            val savedAttachmentPath = if (currentAttachment?.startsWith("content://") == true) {
+                                ImageUtils.compressAndSaveImage(
+                                    context = dialogContext,
+                                    source = currentAttachment,
+                                    subDirName = "attachments",
+                                    maxDimension = 1600,
+                                    quality = 80
+                                ) ?: currentAttachment
+                            } else currentAttachment
 
                             if (currentEdit == null) {
                                 viewModel.addExpense(
@@ -658,9 +706,9 @@ fun MonthlyExpenseScreen(
                             expenseToEdit = null
                         }
                     },
-                    colors = ButtonDefaults.buttonColors(containerColor = GreenPrimary)
+                    colors = ButtonDefaults.buttonColors(containerColor = c.greenPrimary)
                 ) {
-                    Text(if (currentEdit == null) "Save Expense" else "Update Expense", fontWeight = FontWeight.Bold, color = Color.White)
+                    Text(if (currentEdit == null) s.save else s.save, fontWeight = FontWeight.Bold, color = Color.White)
                 }
             },
             dismissButton = {
@@ -668,7 +716,7 @@ fun MonthlyExpenseScreen(
                     showAddDialog = false
                     expenseToEdit = null
                 }) {
-                    Text("Cancel", color = Slate500)
+                    Text(s.cancel, color = c.textMuted)
                 }
             }
         )
@@ -682,7 +730,7 @@ fun MonthlyExpenseScreen(
                 showDeleteConfirmDialog = false
                 expenseToDelete = null
             },
-            containerColor = Color.White,
+            containerColor = c.card,
             shape = RoundedCornerShape(20.dp),
             properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false),
             modifier = Modifier
@@ -690,16 +738,16 @@ fun MonthlyExpenseScreen(
                 .padding(horizontal = 15.dp),
             title = {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(Icons.Default.Warning, contentDescription = null, tint = RedDebit)
+                    Icon(Icons.Default.Warning, contentDescription = null, tint = c.redDebit)
                     Spacer(modifier = Modifier.width(8.dp))
-                    Text("Confirm Expense Deletion", fontSize = 17.sp, fontWeight = FontWeight.ExtraBold, color = Slate900)
+                    Text("Confirm Expense Deletion", fontSize = 17.sp, fontWeight = FontWeight.ExtraBold, color = c.textPrimary)
                 }
             },
             text = {
                 Text(
                     text = "Are you sure you want to delete this expense?\n\n'${target.title}' (₹ ${String.format("%,.0f", target.amount)})",
                     fontSize = 14.sp,
-                    color = Slate700
+                    color = c.textSecondary
                 )
             },
             confirmButton = {
@@ -710,9 +758,9 @@ fun MonthlyExpenseScreen(
                         expenseToDelete = null
                     },
                     shape = RoundedCornerShape(10.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = RedDebit)
+                    colors = ButtonDefaults.buttonColors(containerColor = c.redDebit)
                 ) {
-                    Text("Delete Expense", fontWeight = FontWeight.Bold, color = Color.White)
+                    Text(s.remove, fontWeight = FontWeight.Bold, color = Color.White)
                 }
             },
             dismissButton = {
@@ -722,9 +770,9 @@ fun MonthlyExpenseScreen(
                         expenseToDelete = null
                     },
                     shape = RoundedCornerShape(10.dp),
-                    border = androidx.compose.foundation.BorderStroke(1.dp, Slate300)
+                    border = androidx.compose.foundation.BorderStroke(1.dp, c.borderStrong)
                 ) {
-                    Text("Cancel", color = Slate700, fontWeight = FontWeight.SemiBold)
+                    Text(s.cancel, color = c.textSecondary, fontWeight = FontWeight.SemiBold)
                 }
             }
         )
@@ -744,14 +792,14 @@ fun MonthlyExpenseScreen(
 
         AlertDialog(
             onDismissRequest = { showMonthYearPickerDialog = false },
-            containerColor = Color.White,
+            containerColor = c.card,
             shape = RoundedCornerShape(20.dp),
             properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false),
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(horizontal = 15.dp),
             title = {
-                Text("Select Expense Period", fontSize = 18.sp, fontWeight = FontWeight.ExtraBold, color = Slate900)
+                Text("Select Expense Period", fontSize = 18.sp, fontWeight = FontWeight.ExtraBold, color = c.textPrimary)
             },
             text = {
                 Column(
@@ -762,24 +810,24 @@ fun MonthlyExpenseScreen(
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .background(SurfaceBackground, RoundedCornerShape(12.dp))
+                            .background(c.surfaceSubtle, RoundedCornerShape(12.dp))
                             .padding(8.dp),
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         IconButton(onClick = { pickerYear -= 1 }) {
-                            Icon(Icons.Default.ChevronLeft, contentDescription = "Prev Year", tint = GreenPrimary)
+                            Icon(Icons.Default.ChevronLeft, contentDescription = "Prev Year", tint = c.greenPrimary)
                         }
 
                         Text(
                             text = pickerYear.toString(),
                             fontSize = 20.sp,
                             fontWeight = FontWeight.ExtraBold,
-                            color = GreenPrimary
+                            color = c.greenPrimary
                         )
 
                         IconButton(onClick = { pickerYear += 1 }) {
-                            Icon(Icons.Default.ChevronRight, contentDescription = "Next Year", tint = GreenPrimary)
+                            Icon(Icons.Default.ChevronRight, contentDescription = "Next Year", tint = c.greenPrimary)
                         }
                     }
 
@@ -794,8 +842,10 @@ fun MonthlyExpenseScreen(
                                 onClick = { pickerYear = y },
                                 label = { Text(y.toString(), fontSize = 11.sp, fontWeight = FontWeight.Bold) },
                                 colors = FilterChipDefaults.filterChipColors(
-                                    selectedContainerColor = GreenPrimary,
-                                    selectedLabelColor = Color.White
+                                    selectedContainerColor = c.greenPrimary,
+                                    selectedLabelColor = Color.White,
+                                    containerColor = c.surfaceSubtle,
+                                    labelColor = c.textSecondary
                                 )
                             )
                         }
@@ -813,7 +863,7 @@ fun MonthlyExpenseScreen(
                                     val isSel = mIdx == pickerMonthIndex
                                     Surface(
                                         shape = RoundedCornerShape(10.dp),
-                                        color = if (isSel) GreenPrimary else SurfaceBackground,
+                                        color = if (isSel) c.greenPrimary else c.surfaceSubtle,
                                         modifier = Modifier
                                             .weight(1f)
                                             .clip(RoundedCornerShape(10.dp))
@@ -827,7 +877,7 @@ fun MonthlyExpenseScreen(
                                                 text = monthsNames[mIdx],
                                                 fontSize = 13.sp,
                                                 fontWeight = FontWeight.ExtraBold,
-                                                color = if (isSel) Color.White else Slate900
+                                                color = if (isSel) Color.White else c.textPrimary
                                             )
                                         }
                                     }
@@ -844,14 +894,14 @@ fun MonthlyExpenseScreen(
                         selectedMonth = "$pickerYear-$formattedMonth"
                         showMonthYearPickerDialog = false
                     },
-                    colors = ButtonDefaults.buttonColors(containerColor = GreenPrimary)
+                    colors = ButtonDefaults.buttonColors(containerColor = c.greenPrimary)
                 ) {
-                    Text("Apply Period", fontWeight = FontWeight.Bold, color = Color.White)
+                    Text(s.done, fontWeight = FontWeight.Bold, color = Color.White)
                 }
             },
             dismissButton = {
                 TextButton(onClick = { showMonthYearPickerDialog = false }) {
-                    Text("Cancel", color = Slate500)
+                    Text(s.cancel, color = c.textMuted)
                 }
             }
         )

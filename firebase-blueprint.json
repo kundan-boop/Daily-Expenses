@@ -1,0 +1,120 @@
+{
+  "entities": {
+    "BackupManifest": {
+      "title": "BackupManifest",
+      "description": "Metadata manifest for a user's daily encrypted/chunked ledger backup snapshot.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Firebase Auth UID of the user who owns this backup."
+        },
+        "backupDate": {
+          "type": "string",
+          "description": "ISO calendar date of the daily snapshot (yyyy-MM-dd)."
+        },
+        "chunkCount": {
+          "type": "integer",
+          "description": "Total number of ordered payload chunks in the chunks subcollection."
+        },
+        "totalBytes": {
+          "type": "integer",
+          "description": "Total UTF-8 character/byte length across all backup chunks."
+        },
+        "verified": {
+          "type": "boolean",
+          "description": "True once every chunk write has committed cleanly before retention pruning."
+        },
+        "customerCount": {
+          "type": "integer",
+          "description": "Number of customers included in this backup snapshot."
+        },
+        "transactionCount": {
+          "type": "integer",
+          "description": "Number of customer transactions included in this backup snapshot."
+        },
+        "hasUserProfile": {
+          "type": "boolean",
+          "description": "Whether this snapshot includes userProfile metadata and avatar."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp set via FieldValue.serverTimestamp() when snapshot was first created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp set via FieldValue.serverTimestamp() on each update."
+        }
+      },
+      "required": [
+        "userId",
+        "backupDate",
+        "chunkCount",
+        "totalBytes",
+        "verified",
+        "customerCount",
+        "transactionCount",
+        "hasUserProfile",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "BackupChunk": {
+      "title": "BackupChunk",
+      "description": "Ordered UTF-8 JSON chunk belonging to a BackupManifest.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Firebase Auth UID of the user who owns the parent backup."
+        },
+        "backupId": {
+          "type": "string",
+          "description": "Document ID of the parent BackupManifest."
+        },
+        "chunkIndex": {
+          "type": "integer",
+          "description": "Zero-based index of this chunk within the parent backup."
+        },
+        "payload": {
+          "type": "string",
+          "description": "UTF-8 JSON substring payload segment for this chunk."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp set via FieldValue.serverTimestamp() on creation."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp set via FieldValue.serverTimestamp() on update."
+        }
+      },
+      "required": [
+        "userId",
+        "backupId",
+        "chunkIndex",
+        "payload",
+        "createdAt",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}/backups/{backupId}": {
+      "schema": {
+        "$ref": "#/entities/BackupManifest"
+      },
+      "description": "Daily user-scoped cloud backup manifests (7-day retention)."
+    },
+    "/users/{userId}/backups/{backupId}/chunks/{chunkId}": {
+      "schema": {
+        "$ref": "#/entities/BackupChunk"
+      },
+      "description": "Chunked backup JSON segments scoped under the parent BackupManifest."
+    }
+  }
+}

@@ -19,7 +19,8 @@ import androidx.room.PrimaryKey
         Index("customerId"),
         Index("dateTimestamp"),
         Index("transactionType"),
-        Index("paymentMode")
+        Index("paymentMode"),
+        Index(value = ["customerId", "dateTimestamp"])
     ]
 )
 data class TransactionEntity(

@@ -25,26 +25,30 @@ class DailyExpenseRepository(private val db: AppDatabase, private val context: C
 
     fun getCustomerById(id: Long): Flow<CustomerEntity?> = customerDao.getCustomerById(id)
 
-    fun getCustomersPaged(query: String = ""): androidx.paging.PagingSource<Int, CustomerEntity> {
-        return if (query.isBlank()) customerDao.getCustomersPaged() else customerDao.searchCustomersPaged(query)
-    }
-
     fun getTransactionsForCustomerPaged(customerId: Long): androidx.paging.PagingSource<Int, TransactionEntity> {
         return transactionDao.getTransactionsForCustomerPaged(customerId)
     }
 
-    fun getAllTransactionsPaged(): androidx.paging.PagingSource<Int, TransactionEntity> {
-        return transactionDao.getAllTransactionsPaged()
-    }
+    fun observeSummaryPeriodTotals(startMillis: Long, endMillis: Long): Flow<SummaryPeriodTotalsTuple> =
+        transactionDao.observeSummaryPeriodTotals(startMillis, endMillis)
+
+    fun observeDailyBuckets(startMillis: Long, endMillis: Long): Flow<List<SummaryChartBucketTuple>> =
+        transactionDao.observeDailyBuckets(startMillis, endMillis)
+
+    fun observeMonthlyBuckets(startMillis: Long, endMillis: Long): Flow<List<SummaryChartBucketTuple>> =
+        transactionDao.observeMonthlyBuckets(startMillis, endMillis)
+
+    fun observeYearlyBuckets(startMillis: Long, endMillis: Long): Flow<List<SummaryChartBucketTuple>> =
+        transactionDao.observeYearlyBuckets(startMillis, endMillis)
+
+    fun getSummaryTransactionsPaged(startMillis: Long, endMillis: Long): androidx.paging.PagingSource<Int, SummaryTransactionTuple> =
+        transactionDao.getSummaryTransactionsPaged(startMillis, endMillis)
 
     fun getTransactionsForCustomer(customerId: Long): Flow<List<TransactionEntity>> =
         transactionDao.getTransactionsForCustomer(customerId)
 
     suspend fun getTransactionsForCustomerDirect(customerId: Long): List<TransactionEntity> =
         transactionDao.getTransactionsForCustomerDirect(customerId)
-
-    fun getExpensesByMonth(monthYear: String): Flow<List<MonthlyExpenseEntity>> =
-        monthlyExpenseDao.getExpensesByMonth(monthYear)
 
     suspend fun insertCustomer(customer: CustomerEntity): Long {
         val id = customerDao.insertCustomer(customer)
@@ -59,11 +63,6 @@ class DailyExpenseRepository(private val db: AppDatabase, private val context: C
 
     suspend fun deleteCustomer(customer: CustomerEntity) {
         customerDao.deleteCustomer(customer)
-        onDataModified()
-    }
-
-    suspend fun deleteCustomerById(id: Long) {
-        customerDao.deleteCustomerById(id)
         onDataModified()
     }
 
@@ -138,9 +137,5 @@ class DailyExpenseRepository(private val db: AppDatabase, private val context: C
         val txAttachments = transactionDao.getAllTransactionsDirect().mapNotNull { it.attachmentPath }
         val expAttachments = monthlyExpenseDao.getAllExpensesDirect().mapNotNull { it.attachmentPath }
         return (custPhotos + txAttachments + expAttachments).toSet()
-    }
-
-    suspend fun vacuumDatabase() {
-        DatabaseManager.optimizeDatabase(db)
     }
 }

@@ -23,83 +23,112 @@ class DriveBackupWorker(
         Log.d(TAG, "DriveBackupWorker triggered by WorkManager (attempt $runAttemptCount)...")
 
         val driveFolderUri = BackupManager.getDriveFolderUri(applicationContext)
-        if (driveFolderUri == null) {
-            Log.d(TAG, "Google Drive folder not configured. Worker exiting.")
-            BackupManager.setPendingDriveBackup(applicationContext, false)
-            BackupManager.updateBackupStatus(
-                applicationContext,
-                BackupState.NOT_CONFIGURED,
-                0L,
-                null
-            )
+        val driveEnabled = driveFolderUri != null &&
+            com.example.utils.AppPreferencesManager.isDriveAutoBackupEnabled(applicationContext)
+        val firebaseEnabled = BackupManager.isFirebaseAutoBackupReady(applicationContext)
+
+        if (!driveEnabled && !firebaseEnabled) {
+            Log.d(TAG, "Neither Drive nor Firebase auto-backup is active. Worker exiting.")
+            if (driveFolderUri == null) {
+                BackupManager.setPendingDriveBackup(applicationContext, false)
+                BackupManager.updateBackupStatus(
+                    applicationContext,
+                    BackupState.NOT_CONFIGURED,
+                    0L,
+                    null
+                )
+            }
             return@withContext Result.success()
         }
 
         val isOnline = BackupManager.isNetworkAvailable(applicationContext)
         if (!isOnline) {
-            Log.d(TAG, "Device is offline. Queuing backup to retry automatically when network is available.")
-            BackupManager.setPendingDriveBackup(applicationContext, true)
-            BackupManager.updateBackupStatus(
-                applicationContext,
-                BackupState.PENDING_OFFLINE,
-                BackupManager.getLastDriveBackupTime(applicationContext),
-                "Offline: waiting for network connection"
-            )
+            Log.d(TAG, "Device is offline. Queuing cloud backup retry.")
+            if (driveEnabled) {
+                BackupManager.setPendingDriveBackup(applicationContext, true)
+                BackupManager.updateBackupStatus(
+                    applicationContext,
+                    BackupState.PENDING_OFFLINE,
+                    BackupManager.getLastDriveBackupTime(applicationContext),
+                    "Offline: waiting for network connection"
+                )
+            }
+            if (firebaseEnabled) {
+                com.example.utils.AppPreferencesManager.setPendingFirebaseBackup(applicationContext, true)
+                com.example.utils.AppPreferencesManager.updateFirebaseStatus(
+                    context = applicationContext,
+                    state = BackupState.PENDING_OFFLINE,
+                    errorMessage = "Offline: waiting for network connection"
+                )
+            }
             return@withContext Result.retry()
         }
 
         try {
-            BackupManager.updateBackupStatus(
-                applicationContext,
-                BackupState.IN_PROGRESS,
-                BackupManager.getLastDriveBackupTime(applicationContext),
-                null
-            )
-
-            val jsonString = BackupManager.exportDatabaseToJson(applicationContext)
-            if (jsonString.isBlank()) {
+            val pkg = BackupManager.exportFullBackupPackage(applicationContext)
+            if (pkg.jsonString.isBlank()) {
                 Log.w(TAG, "Database export produced empty JSON. Skipping upload.")
                 return@withContext Result.success()
             }
 
-            // Write local backup first
-            BackupManager.performDailyBackup(applicationContext, jsonString)
+            // Always update 2-day local daily backup
+            BackupManager.performDailyBackup(applicationContext, pkg.jsonString)
 
-            // Perform Drive backup with same-day overwrite & 3-day rotation inside DailyExpenseBackups
-            val success = BackupManager.performDriveAutoBackup(applicationContext, jsonString)
+            var needsRetry = false
 
-            if (success) {
-                Log.d(TAG, "WorkManager Google Drive auto-backup succeeded!")
-                val now = System.currentTimeMillis()
-                BackupManager.setPendingDriveBackup(applicationContext, false)
-                BackupManager.markBackupCompleted(applicationContext)
+            if (driveEnabled) {
                 BackupManager.updateBackupStatus(
                     applicationContext,
-                    BackupState.SUCCESS,
-                    now,
+                    BackupState.IN_PROGRESS,
+                    BackupManager.getLastDriveBackupTime(applicationContext),
                     null
                 )
-                Result.success()
+                val driveOk = BackupManager.performDriveAutoBackup(applicationContext, pkg.jsonString)
+                if (driveOk) {
+                    val now = System.currentTimeMillis()
+                    BackupManager.setPendingDriveBackup(applicationContext, false)
+                    BackupManager.updateBackupStatus(
+                        applicationContext,
+                        BackupState.SUCCESS,
+                        now,
+                        null
+                    )
+                } else {
+                    needsRetry = true
+                    BackupManager.setPendingDriveBackup(applicationContext, true)
+                    BackupManager.updateBackupStatus(
+                        applicationContext,
+                        BackupState.FAILED,
+                        BackupManager.getLastDriveBackupTime(applicationContext),
+                        "Upload failed. Will retry automatically."
+                    )
+                }
+            }
+
+            if (firebaseEnabled) {
+                val firebaseOk = BackupManager.performPendingFirebaseBackup(applicationContext)
+                if (!firebaseOk) {
+                    needsRetry = true
+                }
+            }
+
+            return@withContext if (needsRetry) {
+                Result.retry()
             } else {
-                Log.e(TAG, "Google Drive auto-backup upload failed.")
+                BackupManager.markBackupCompleted(applicationContext)
+                Result.success()
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Exception during DriveBackupWorker: ${e.message}", e)
+            if (driveEnabled) {
                 BackupManager.setPendingDriveBackup(applicationContext, true)
                 BackupManager.updateBackupStatus(
                     applicationContext,
                     BackupState.FAILED,
                     BackupManager.getLastDriveBackupTime(applicationContext),
-                    "Upload failed. Will retry automatically."
+                    e.message ?: "Backup failed"
                 )
-                Result.retry()
             }
-        } catch (e: Exception) {
-            Log.e(TAG, "Exception during DriveBackupWorker: ${e.message}", e)
-            BackupManager.setPendingDriveBackup(applicationContext, true)
-            BackupManager.updateBackupStatus(
-                applicationContext,
-                BackupState.FAILED,
-                BackupManager.getLastDriveBackupTime(applicationContext),
-                e.message ?: "Backup failed"
-            )
             Result.retry()
         }
     }

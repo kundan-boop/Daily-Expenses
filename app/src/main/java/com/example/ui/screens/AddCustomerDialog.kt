@@ -33,10 +33,14 @@ import androidx.compose.foundation.layout.isImeVisible
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.platform.LocalView
 import androidx.core.content.ContextCompat
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import com.example.data.CustomerEntity
 import com.example.ui.DailyExpenseViewModel
 import com.example.ui.theme.*
+import com.example.utils.LocalAppStrings
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
@@ -46,25 +50,24 @@ fun AddCustomerDialog(
     onDismiss: () -> Unit
 ) {
     val context = LocalContext.current
-    val keyboardController = LocalSoftwareKeyboardController.current
-    val focusManager = LocalFocusManager.current
-    val isImeVisible = WindowInsets.isImeVisible
+    val c = LedgerTheme.colors
+    val s = LocalAppStrings.current
+    var dialogViewRef by remember { mutableStateOf<android.view.View?>(null) }
+    var lastImeCloseTime by remember { mutableLongStateOf(0L) }
 
-    // Intercept back press when keyboard is open to dismiss only keyboard and keep dialog & typed data
-    BackHandler(enabled = isImeVisible) {
-        keyboardController?.hide()
-        focusManager.clearFocus()
+    val draftKey = remember(customerToEdit) {
+        customerToEdit?.let { "${it.id}_${it.lastUpdatedTimestamp}" } ?: "new"
     }
-
-    var name by remember { mutableStateOf(customerToEdit?.name ?: "") }
-    var mobileNumber by remember { mutableStateOf(customerToEdit?.mobileNumber ?: "") }
-    var address by remember { mutableStateOf(customerToEdit?.address ?: "") }
-    var email by remember { mutableStateOf(customerToEdit?.email ?: "") }
-    var notes by remember { mutableStateOf(customerToEdit?.notes ?: "") }
-    var collectToday by remember { mutableStateOf(customerToEdit?.collectToday ?: false) }
-    var collectDueDate by remember { mutableStateOf<Long?>(customerToEdit?.collectDueDate) }
+    var name by remember(draftKey) { mutableStateOf(customerToEdit?.name ?: "") }
+    var mobileNumber by remember(draftKey) { mutableStateOf(customerToEdit?.mobileNumber ?: "") }
+    var address by remember(draftKey) { mutableStateOf(customerToEdit?.address ?: "") }
+    var email by remember(draftKey) { mutableStateOf(customerToEdit?.email ?: "") }
+    var notes by remember(draftKey) { mutableStateOf(customerToEdit?.notes ?: "") }
+    var collectToday by remember(draftKey) { mutableStateOf(customerToEdit?.collectToday ?: false) }
+    var collectDueDate by remember(draftKey) { mutableStateOf<Long?>(customerToEdit?.collectDueDate) }
     var showDatePicker by remember { mutableStateOf(false) }
     var nameError by remember { mutableStateOf(false) }
+    var isSaving by remember { mutableStateOf(false) }
 
     // Contact Picker Launcher
     val contactPickerLauncher = rememberLauncherForActivityResult(
@@ -122,10 +125,20 @@ fun AddCustomerDialog(
     }
 
     AlertDialog(
-        onDismissRequest = onDismiss,
-        containerColor = Color.White,
+        onDismissRequest = {
+            val liveIme = dialogViewRef?.let {
+                ViewCompat.getRootWindowInsets(it)?.isVisible(WindowInsetsCompat.Type.ime())
+            } == true
+            if (!liveIme && System.currentTimeMillis() - lastImeCloseTime > 300L) {
+                onDismiss()
+            }
+        },
+        containerColor = c.card,
         shape = RoundedCornerShape(20.dp),
-        properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false),
+        properties = androidx.compose.ui.window.DialogProperties(
+            usePlatformDefaultWidth = false,
+            dismissOnBackPress = false
+        ),
         modifier = Modifier
             .fillMaxWidth()
             .widthIn(max = 520.dp)
@@ -133,16 +146,37 @@ fun AddCustomerDialog(
             .padding(horizontal = 15.dp),
         title = {
             Text(
-                text = if (customerToEdit == null) "Add New Customer" else "Edit Customer Info",
+                text = if (customerToEdit == null) s.addNewCustomer else s.editCustomer,
                 fontWeight = FontWeight.Bold,
                 fontSize = 18.sp,
-                color = Slate900
+                color = c.textPrimary
             )
         },
         text = {
-            BackHandler(enabled = isImeVisible) {
-                keyboardController?.hide()
-                focusManager.clearFocus()
+            val dialogView = LocalView.current
+            val sheetImeVisible = WindowInsets.isImeVisible
+            val dialogKeyboardController = LocalSoftwareKeyboardController.current
+            val dialogFocusManager = LocalFocusManager.current
+            var prevIme by remember { mutableStateOf(false) }
+
+            LaunchedEffect(dialogView) { dialogViewRef = dialogView }
+            LaunchedEffect(sheetImeVisible) {
+                if (prevIme && !sheetImeVisible) {
+                    lastImeCloseTime = System.currentTimeMillis()
+                }
+                prevIme = sheetImeVisible
+            }
+
+            BackHandler(enabled = true) {
+                val liveIme = sheetImeVisible ||
+                    (ViewCompat.getRootWindowInsets(dialogView)?.isVisible(WindowInsetsCompat.Type.ime()) == true)
+                if (liveIme) {
+                    lastImeCloseTime = System.currentTimeMillis()
+                    dialogKeyboardController?.hide()
+                    dialogFocusManager.clearFocus()
+                } else if (System.currentTimeMillis() - lastImeCloseTime > 300L) {
+                    onDismiss()
+                }
             }
             Column(
                 modifier = Modifier
@@ -163,9 +197,10 @@ fun AddCustomerDialog(
                         },
                         modifier = Modifier.fillMaxWidth(),
                         shape = RoundedCornerShape(10.dp),
-                        colors = ButtonDefaults.outlinedButtonColors(contentColor = OceanBlue)
+                        border = androidx.compose.foundation.BorderStroke(1.dp, c.blueAccent.copy(alpha = 0.5f)),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = c.blueAccent)
                     ) {
-                        Icon(Icons.Default.Contacts, contentDescription = null, modifier = Modifier.size(18.dp), tint = OceanBlue)
+                        Icon(Icons.Default.Contacts, contentDescription = null, modifier = Modifier.size(18.dp), tint = c.blueAccent)
                         Spacer(modifier = Modifier.width(6.dp))
                         Text("Import from Phone Contacts", fontSize = 12.sp, fontWeight = FontWeight.Bold)
                     }
@@ -177,19 +212,21 @@ fun AddCustomerDialog(
                         name = it
                         if (it.isNotBlank()) nameError = false
                     },
-                    label = { Text("Customer Name *", color = Slate700) },
+                    label = { Text("Customer Name *", color = c.textSecondary) },
                     isError = nameError,
-                    leadingIcon = { Icon(Icons.Default.Person, contentDescription = null, tint = GreenPrimary) },
+                    leadingIcon = { Icon(Icons.Default.Person, contentDescription = null, tint = c.greenPrimary) },
                     singleLine = true,
-                    textStyle = LocalTextStyle.current.copy(color = Slate900, fontSize = 14.sp),
+                    textStyle = LocalTextStyle.current.copy(color = c.textPrimary, fontSize = 14.sp),
                     colors = OutlinedTextFieldDefaults.colors(
-                        focusedBorderColor = GreenPrimary,
-                        unfocusedBorderColor = Slate400,
-                        errorBorderColor = RedDebit,
-                        focusedLabelColor = GreenPrimary,
-                        unfocusedLabelColor = Slate700,
-                        focusedTextColor = Slate900,
-                        unfocusedTextColor = Slate900
+                        focusedBorderColor = c.greenPrimary,
+                        unfocusedBorderColor = c.borderStrong,
+                        errorBorderColor = c.redDebit,
+                        focusedLabelColor = c.greenPrimary,
+                        unfocusedLabelColor = c.textSecondary,
+                        focusedTextColor = c.textPrimary,
+                        unfocusedTextColor = c.textPrimary,
+                        focusedContainerColor = c.surfaceSubtle,
+                        unfocusedContainerColor = c.surfaceSubtle
                     ),
                     modifier = Modifier
                         .fillMaxWidth()
@@ -200,18 +237,20 @@ fun AddCustomerDialog(
                 OutlinedTextField(
                     value = mobileNumber,
                     onValueChange = { mobileNumber = it },
-                    label = { Text("Mobile Number (Optional)", color = Slate700) },
-                    leadingIcon = { Icon(Icons.Default.Phone, contentDescription = null, tint = OceanBlue) },
+                    label = { Text("Mobile Number (Optional)", color = c.textSecondary) },
+                    leadingIcon = { Icon(Icons.Default.Phone, contentDescription = null, tint = c.blueAccent) },
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
                     singleLine = true,
-                    textStyle = LocalTextStyle.current.copy(color = Slate900, fontSize = 14.sp),
+                    textStyle = LocalTextStyle.current.copy(color = c.textPrimary, fontSize = 14.sp),
                     colors = OutlinedTextFieldDefaults.colors(
-                        focusedBorderColor = OceanBlue,
-                        unfocusedBorderColor = Slate400,
-                        focusedLabelColor = OceanBlue,
-                        unfocusedLabelColor = Slate700,
-                        focusedTextColor = Slate900,
-                        unfocusedTextColor = Slate900
+                        focusedBorderColor = c.blueAccent,
+                        unfocusedBorderColor = c.borderStrong,
+                        focusedLabelColor = c.blueAccent,
+                        unfocusedLabelColor = c.textSecondary,
+                        focusedTextColor = c.textPrimary,
+                        unfocusedTextColor = c.textPrimary,
+                        focusedContainerColor = c.surfaceSubtle,
+                        unfocusedContainerColor = c.surfaceSubtle
                     ),
                     modifier = Modifier
                         .fillMaxWidth()
@@ -222,15 +261,17 @@ fun AddCustomerDialog(
                 OutlinedTextField(
                     value = address,
                     onValueChange = { address = it },
-                    label = { Text("Address / Location (Optional)", color = Slate700) },
-                    leadingIcon = { Icon(Icons.Default.Home, contentDescription = null, tint = Slate500) },
+                    label = { Text("Address / Location (Optional)", color = c.textSecondary) },
+                    leadingIcon = { Icon(Icons.Default.Home, contentDescription = null, tint = c.textMuted) },
                     singleLine = true,
-                    textStyle = LocalTextStyle.current.copy(color = Slate900, fontSize = 14.sp),
+                    textStyle = LocalTextStyle.current.copy(color = c.textPrimary, fontSize = 14.sp),
                     colors = OutlinedTextFieldDefaults.colors(
-                        focusedBorderColor = GreenPrimary,
-                        unfocusedBorderColor = Slate400,
-                        focusedTextColor = Slate900,
-                        unfocusedTextColor = Slate900
+                        focusedBorderColor = c.greenPrimary,
+                        unfocusedBorderColor = c.borderStrong,
+                        focusedTextColor = c.textPrimary,
+                        unfocusedTextColor = c.textPrimary,
+                        focusedContainerColor = c.surfaceSubtle,
+                        unfocusedContainerColor = c.surfaceSubtle
                     ),
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(12.dp)
@@ -239,14 +280,16 @@ fun AddCustomerDialog(
                 OutlinedTextField(
                     value = notes,
                     onValueChange = { notes = it },
-                    label = { Text("Notes / Business Details (Optional)", color = Slate700) },
-                    leadingIcon = { Icon(Icons.AutoMirrored.Filled.Notes, contentDescription = null, tint = Slate500) },
-                    textStyle = LocalTextStyle.current.copy(color = Slate900, fontSize = 14.sp),
+                    label = { Text("Notes / Business Details (Optional)", color = c.textSecondary) },
+                    leadingIcon = { Icon(Icons.AutoMirrored.Filled.Notes, contentDescription = null, tint = c.textMuted) },
+                    textStyle = LocalTextStyle.current.copy(color = c.textPrimary, fontSize = 14.sp),
                     colors = OutlinedTextFieldDefaults.colors(
-                        focusedBorderColor = GreenPrimary,
-                        unfocusedBorderColor = Slate400,
-                        focusedTextColor = Slate900,
-                        unfocusedTextColor = Slate900
+                        focusedBorderColor = c.greenPrimary,
+                        unfocusedBorderColor = c.borderStrong,
+                        focusedTextColor = c.textPrimary,
+                        unfocusedTextColor = c.textPrimary,
+                        focusedContainerColor = c.surfaceSubtle,
+                        unfocusedContainerColor = c.surfaceSubtle
                     ),
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(12.dp)
@@ -260,14 +303,14 @@ fun AddCustomerDialog(
                         Checkbox(
                             checked = collectToday,
                             onCheckedChange = { collectToday = it },
-                            colors = CheckboxDefaults.colors(checkedColor = GreenPrimary, uncheckedColor = Slate500)
+                            colors = CheckboxDefaults.colors(checkedColor = c.greenPrimary, uncheckedColor = c.textMuted)
                         )
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(
-                            text = "Mark 'Collect Today' Badge",
+                            text = s.collectTodayBadge,
                             fontSize = 14.sp,
                             fontWeight = FontWeight.Bold,
-                            color = Slate900
+                            color = c.textPrimary
                         )
                     }
 
@@ -281,10 +324,10 @@ fun AddCustomerDialog(
                             onClick = { showDatePicker = true },
                             modifier = Modifier.weight(1f),
                             shape = RoundedCornerShape(12.dp),
-                            colors = ButtonDefaults.outlinedButtonColors(contentColor = GreenPrimary),
-                            border = androidx.compose.foundation.BorderStroke(1.dp, if (collectDueDate != null) GreenPrimary else Slate400)
+                            colors = ButtonDefaults.outlinedButtonColors(contentColor = c.greenPrimary),
+                            border = androidx.compose.foundation.BorderStroke(1.dp, if (collectDueDate != null) c.greenPrimary else c.borderStrong)
                         ) {
-                            Icon(Icons.Default.Event, contentDescription = null, modifier = Modifier.size(18.dp), tint = GreenPrimary)
+                            Icon(Icons.Default.Event, contentDescription = null, modifier = Modifier.size(18.dp), tint = c.greenPrimary)
                             Spacer(modifier = Modifier.width(8.dp))
                             val dateText = if (collectDueDate != null) {
                                 val sdf = java.text.SimpleDateFormat("dd MMM yyyy", java.util.Locale.getDefault()).apply {
@@ -306,7 +349,7 @@ fun AddCustomerDialog(
                                 Icon(
                                     Icons.Default.Close,
                                     contentDescription = "Clear Due Date",
-                                    tint = RedDebit,
+                                    tint = c.redDebit,
                                     modifier = Modifier.size(20.dp)
                                 )
                             }
@@ -317,12 +360,14 @@ fun AddCustomerDialog(
         },
         confirmButton = {
             Button(
+                enabled = !isSaving,
                 onClick = {
                     if (name.isBlank()) {
                         nameError = true
                     } else {
+                        isSaving = true
                         if (customerToEdit == null) {
-                            viewModel.setSearchQuery("")
+                            viewModel.clearCustomerSearchQuery()
                             viewModel.addCustomer(
                                 name = name,
                                 mobileNumber = mobileNumber,
@@ -330,11 +375,23 @@ fun AddCustomerDialog(
                                 email = email,
                                 notes = notes,
                                 collectToday = collectToday,
-                                collectDueDate = collectDueDate
+                                collectDueDate = collectDueDate,
+                                onSuccess = {
+                                    isSaving = false
+                                    onDismiss()
+                                },
+                                onError = { err ->
+                                    isSaving = false
+                                    Toast.makeText(
+                                        context,
+                                        "Failed to save customer: ${err.localizedMessage ?: "Unknown error"}",
+                                        Toast.LENGTH_SHORT
+                                    ).show()
+                                }
                             )
                         } else {
                             viewModel.updateCustomer(
-                                customerToEdit.copy(
+                                customer = customerToEdit.copy(
                                     name = name.trim(),
                                     mobileNumber = mobileNumber.trim(),
                                     address = address.trim(),
@@ -342,22 +399,33 @@ fun AddCustomerDialog(
                                     notes = notes.trim(),
                                     collectToday = collectToday,
                                     collectDueDate = collectDueDate
-                                )
+                                ),
+                                onSuccess = {
+                                    isSaving = false
+                                    onDismiss()
+                                },
+                                onError = { err ->
+                                    isSaving = false
+                                    Toast.makeText(
+                                        context,
+                                        "Failed to update customer: ${err.localizedMessage ?: "Unknown error"}",
+                                        Toast.LENGTH_SHORT
+                                    ).show()
+                                }
                             )
                         }
-                        onDismiss()
                     }
                 },
-                colors = ButtonDefaults.buttonColors(containerColor = GreenPrimary),
+                colors = ButtonDefaults.buttonColors(containerColor = c.greenPrimary, contentColor = Color.White),
                 shape = RoundedCornerShape(12.dp),
                 modifier = Modifier.testTag("save_customer_button")
             ) {
-                Text(if (customerToEdit == null) "Add Customer" else "Save Changes", fontWeight = FontWeight.Bold)
+                Text(if (customerToEdit == null) s.addCustomer else s.save, fontWeight = FontWeight.Bold)
             }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) {
-                Text("Cancel", color = Slate500)
+            TextButton(enabled = !isSaving, onClick = onDismiss) {
+                Text(s.cancel, color = c.textMuted)
             }
         }
     )
@@ -373,7 +441,7 @@ fun AddCustomerDialog(
                     collectDueDate = datePickerState.selectedDateMillis
                     showDatePicker = false
                 }) {
-                    Text("OK", fontWeight = FontWeight.Bold, color = GreenPrimary)
+                    Text("OK", fontWeight = FontWeight.Bold, color = c.greenPrimary)
                 }
             },
             dismissButton = {
@@ -383,11 +451,11 @@ fun AddCustomerDialog(
                             collectDueDate = null
                             showDatePicker = false
                         }) {
-                            Text("Clear Date", color = RedDebit, fontWeight = FontWeight.Bold)
+                            Text("Clear Date", color = c.redDebit, fontWeight = FontWeight.Bold)
                         }
                     }
                     TextButton(onClick = { showDatePicker = false }) {
-                        Text("Cancel", color = Slate500)
+                        Text(s.cancel, color = c.textMuted)
                     }
                 }
             }

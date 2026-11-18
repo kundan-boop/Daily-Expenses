@@ -24,7 +24,7 @@ object ImageUtils {
         source: String?,
         subDirName: String = "attachments",
         maxDimension: Int = 1600,
-        quality: Int = 90
+        quality: Int = 80
     ): String? {
         if (source.isNullOrBlank()) return null
         val clean = source.trim()
@@ -194,7 +194,7 @@ object ImageUtils {
         inputBitmap: Bitmap?,
         subDirName: String = "attachments",
         maxDimension: Int = 1600,
-        quality: Int = 90
+        quality: Int = 80
     ): String? {
         if (inputBitmap == null) return null
         return try {
@@ -286,5 +286,90 @@ object ImageUtils {
             try { inputStream?.close() } catch (_: Exception) {}
         }
         return extractedPaths
+    }
+
+    fun encodeImageToBase64(
+        context: Context,
+        source: String?,
+        maxDimension: Int = 1024,
+        quality: Int = 85
+    ): String? {
+        if (source.isNullOrBlank()) return null
+        return try {
+            val bytes = readImageBytes(context, source) ?: return null
+            if (bytes.isEmpty()) return null
+
+            val rotationDegrees = getExifOrientationDegrees(bytes)
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+            if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
+                return Base64.encodeToString(bytes, Base64.NO_WRAP)
+            }
+
+            var sampleSize = 1
+            var w = bounds.outWidth
+            var h = bounds.outHeight
+            while (w / 2 >= maxDimension || h / 2 >= maxDimension) {
+                w /= 2
+                h /= 2
+                sampleSize *= 2
+            }
+
+            val decodeOpts = BitmapFactory.Options().apply { inSampleSize = sampleSize }
+            var bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, decodeOpts)
+                ?: return Base64.encodeToString(bytes, Base64.NO_WRAP)
+
+            if (rotationDegrees != 0) {
+                val matrix = Matrix().apply { postRotate(rotationDegrees.toFloat()) }
+                val rotated = Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+                if (rotated != bitmap) {
+                    bitmap.recycle()
+                    bitmap = rotated
+                }
+            }
+
+            if (bitmap.width > maxDimension || bitmap.height > maxDimension) {
+                val scale = maxDimension.toFloat() / maxOf(bitmap.width, bitmap.height).toFloat()
+                val targetW = (bitmap.width * scale).toInt().coerceAtLeast(1)
+                val targetH = (bitmap.height * scale).toInt().coerceAtLeast(1)
+                val scaled = Bitmap.createScaledBitmap(bitmap, targetW, targetH, true)
+                if (scaled != bitmap) {
+                    bitmap.recycle()
+                    bitmap = scaled
+                }
+            }
+
+            val out = ByteArrayOutputStream()
+            bitmap.compress(Bitmap.CompressFormat.JPEG, quality, out)
+            bitmap.recycle()
+            Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP)
+        } catch (e: Exception) {
+            e.printStackTrace()
+            null
+        }
+    }
+
+    fun saveProfileAvatar(
+        context: Context,
+        source: String?,
+        maxDimension: Int = 1024,
+        quality: Int = 85
+    ): String? {
+        if (source.isNullOrBlank()) return null
+        return try {
+            val base64 = encodeImageToBase64(context, source, maxDimension, quality)
+            val bytes = if (!base64.isNullOrBlank()) {
+                Base64.decode(base64, Base64.DEFAULT)
+            } else {
+                readImageBytes(context, source)
+            } ?: return null
+            if (bytes.isEmpty()) return null
+            val destFile = File(context.filesDir, "user_profile_avatar.jpg")
+            destFile.writeBytes(bytes)
+            destFile.absolutePath
+        } catch (e: Exception) {
+            e.printStackTrace()
+            null
+        }
     }
 }

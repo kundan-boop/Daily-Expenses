@@ -21,6 +21,9 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.platform.LocalView
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
@@ -31,6 +34,7 @@ import androidx.compose.ui.window.DialogProperties
 import com.example.domain.pdf.PdfPreviewItem
 import com.example.domain.pdf.PreviewTransaction
 import com.example.ui.theme.*
+import com.example.utils.LocalAppStrings
 import com.example.utils.PdfFormatType
 import java.util.Locale
 
@@ -51,29 +55,53 @@ fun PdfImportPreviewDialog(
 ) {
     if (previewItems.isEmpty()) return
 
+    val c = LedgerTheme.colors
+    val s = LocalAppStrings.current
     var selectedFileIndex by remember { mutableIntStateOf(0) }
-    val focusManager = LocalFocusManager.current
-    val keyboardController = LocalSoftwareKeyboardController.current
-    val isImeVisible = WindowInsets.isImeVisible
-
-    BackHandler(enabled = isImeVisible) {
-        keyboardController?.hide()
-        focusManager.clearFocus()
-    }
+    var dialogViewRef by remember { mutableStateOf<android.view.View?>(null) }
+    var lastImeCloseTime by remember { mutableLongStateOf(0L) }
 
     val currentItem = previewItems.getOrNull(selectedFileIndex) ?: previewItems.first()
 
     Dialog(
-        onDismissRequest = onDismiss,
+        onDismissRequest = {
+            val liveIme = dialogViewRef?.let {
+                ViewCompat.getRootWindowInsets(it)?.isVisible(WindowInsetsCompat.Type.ime())
+            } == true
+            if (!liveIme && System.currentTimeMillis() - lastImeCloseTime > 300L) {
+                onDismiss()
+            }
+        },
         properties = DialogProperties(
             usePlatformDefaultWidth = false,
-            dismissOnBackPress = true,
+            dismissOnBackPress = false,
             dismissOnClickOutside = false
         )
     ) {
-        BackHandler(enabled = isImeVisible) {
-            keyboardController?.hide()
-            focusManager.clearFocus()
+        val dialogView = LocalView.current
+        val focusManager = LocalFocusManager.current
+        val keyboardController = LocalSoftwareKeyboardController.current
+        val isImeVisible = WindowInsets.isImeVisible
+        var prevIme by remember { mutableStateOf(false) }
+
+        LaunchedEffect(dialogView) { dialogViewRef = dialogView }
+        LaunchedEffect(isImeVisible) {
+            if (prevIme && !isImeVisible) {
+                lastImeCloseTime = System.currentTimeMillis()
+            }
+            prevIme = isImeVisible
+        }
+
+        BackHandler(enabled = true) {
+            val liveIme = isImeVisible ||
+                (ViewCompat.getRootWindowInsets(dialogView)?.isVisible(WindowInsetsCompat.Type.ime()) == true)
+            if (liveIme) {
+                lastImeCloseTime = System.currentTimeMillis()
+                keyboardController?.hide()
+                focusManager.clearFocus()
+            } else if (System.currentTimeMillis() - lastImeCloseTime > 300L) {
+                onDismiss()
+            }
         }
 
         Box(
@@ -87,7 +115,7 @@ fun PdfImportPreviewDialog(
                     .imePadding()
                     .padding(12.dp),
                 shape = RoundedCornerShape(20.dp),
-                color = Color.White,
+                color = c.card,
                 tonalElevation = 6.dp
             ) {
             Column(
@@ -104,14 +132,14 @@ fun PdfImportPreviewDialog(
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Surface(
                             shape = RoundedCornerShape(10.dp),
-                            color = GreenLight,
+                            color = c.greenTint,
                             modifier = Modifier.size(40.dp)
                         ) {
                             Box(contentAlignment = Alignment.Center) {
                                 Icon(
                                     imageVector = Icons.Default.Preview,
                                     contentDescription = null,
-                                    tint = GreenPrimary,
+                                    tint = c.greenPrimary,
                                     modifier = Modifier.size(22.dp)
                                 )
                             }
@@ -122,12 +150,12 @@ fun PdfImportPreviewDialog(
                                 text = "Preview & Edit PDF Import",
                                 fontSize = 18.sp,
                                 fontWeight = FontWeight.Bold,
-                                color = Slate900
+                                color = c.textPrimary
                             )
                             Text(
                                 text = "Verify extracted names, add missing rows, then save",
                                 fontSize = 12.sp,
-                                color = Slate500
+                                color = c.textMuted
                             )
                         }
                     }
@@ -138,8 +166,8 @@ fun PdfImportPreviewDialog(
                     ) {
                         Icon(
                             imageVector = Icons.Default.Close,
-                            contentDescription = "Close",
-                            tint = Slate700,
+                            contentDescription = s.close,
+                            tint = c.textSecondary,
                             modifier = Modifier.size(24.dp)
                         )
                     }
@@ -152,7 +180,7 @@ fun PdfImportPreviewDialog(
                     ScrollableTabRow(
                         selectedTabIndex = selectedFileIndex,
                         edgePadding = 0.dp,
-                        containerColor = Slate100,
+                        containerColor = c.cardElevated,
                         indicator = {},
                         divider = {},
                         modifier = Modifier
@@ -167,7 +195,7 @@ fun PdfImportPreviewDialog(
                                 modifier = Modifier
                                     .padding(4.dp)
                                     .clip(RoundedCornerShape(10.dp))
-                                    .background(if (isSelected) GreenPrimary else Color.Transparent)
+                                    .background(if (isSelected) c.greenPrimary else Color.Transparent)
                             ) {
                                 Row(
                                     modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
@@ -176,7 +204,7 @@ fun PdfImportPreviewDialog(
                                     Icon(
                                         imageVector = if (item.isSuccess) Icons.Default.PictureAsPdf else Icons.Default.Warning,
                                         contentDescription = null,
-                                        tint = if (isSelected) Color.White else if (item.isSuccess) Slate700 else RedDebit,
+                                        tint = if (isSelected) Color.White else if (item.isSuccess) c.textSecondary else c.redDebit,
                                         modifier = Modifier.size(16.dp)
                                     )
                                     Spacer(modifier = Modifier.width(6.dp))
@@ -184,7 +212,7 @@ fun PdfImportPreviewDialog(
                                         text = item.fileName,
                                         fontSize = 12.sp,
                                         fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
-                                        color = if (isSelected) Color.White else Slate700,
+                                        color = if (isSelected) Color.White else c.textSecondary,
                                         maxLines = 1,
                                         overflow = TextOverflow.Ellipsis
                                     )
@@ -197,7 +225,7 @@ fun PdfImportPreviewDialog(
 
                 // File Status Badge / Info
                 Surface(
-                    color = if (currentItem.isSuccess) GreenLight else Color(0xFFFFEBEE),
+                    color = if (currentItem.isSuccess) c.greenTint else c.redTint,
                     shape = RoundedCornerShape(12.dp),
                     modifier = Modifier.fillMaxWidth()
                 ) {
@@ -208,7 +236,7 @@ fun PdfImportPreviewDialog(
                         Icon(
                             imageVector = if (currentItem.isSuccess) Icons.Default.CheckCircle else Icons.Default.Error,
                             contentDescription = null,
-                            tint = if (currentItem.isSuccess) GreenPrimary else RedDebit,
+                            tint = if (currentItem.isSuccess) c.greenPrimary else c.redDebit,
                             modifier = Modifier.size(20.dp)
                         )
                         Spacer(modifier = Modifier.width(8.dp))
@@ -217,7 +245,7 @@ fun PdfImportPreviewDialog(
                                 text = currentItem.fileName,
                                 fontSize = 13.sp,
                                 fontWeight = FontWeight.Bold,
-                                color = Slate900,
+                                color = c.textPrimary,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis
                             )
@@ -229,7 +257,7 @@ fun PdfImportPreviewDialog(
                             Text(
                                 text = if (currentItem.isSuccess) "Format: $formatName (${currentItem.transactions.size} transactions)" else "Error: ${currentItem.errorMessage ?: "Parsing failed"}",
                                 fontSize = 11.sp,
-                                color = if (currentItem.isSuccess) GreenPrimary else RedDebit
+                                color = if (currentItem.isSuccess) c.greenPrimary else c.redDebit
                             )
                         }
                     }
@@ -241,9 +269,9 @@ fun PdfImportPreviewDialog(
                 val hasWarningOrError = !currentItem.isSuccess || currentItem.customerName.isBlank() || currentItem.transactions.isEmpty() || !currentItem.errorMessage.isNullOrBlank()
                 if (hasWarningOrError) {
                     Surface(
-                        color = if (!currentItem.isSuccess) Color(0xFFFFEBEE) else Color(0xFFFFF3CD),
+                        color = if (!currentItem.isSuccess) c.redTint else c.amberTint,
                         shape = RoundedCornerShape(10.dp),
-                        border = androidx.compose.foundation.BorderStroke(1.dp, if (!currentItem.isSuccess) RedDebit.copy(alpha = 0.4f) else Color(0xFFFFEEBA)),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, if (!currentItem.isSuccess) c.redBorder else c.amberBorder),
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(bottom = 10.dp)
@@ -255,7 +283,7 @@ fun PdfImportPreviewDialog(
                             Icon(
                                 imageVector = if (!currentItem.isSuccess) Icons.Default.Error else Icons.Default.Warning,
                                 contentDescription = null,
-                                tint = if (!currentItem.isSuccess) RedDebit else Color(0xFF856404),
+                                tint = if (!currentItem.isSuccess) c.redDebit else c.amberAccent,
                                 modifier = Modifier.size(20.dp)
                             )
                             Spacer(modifier = Modifier.width(8.dp))
@@ -269,7 +297,7 @@ fun PdfImportPreviewDialog(
                                 },
                                 fontSize = 12.sp,
                                 fontWeight = FontWeight.SemiBold,
-                                color = if (!currentItem.isSuccess) RedDebit else Color(0xFF856404)
+                                color = if (!currentItem.isSuccess) c.redDebit else c.amberAccent
                             )
                         }
                     }
@@ -285,7 +313,7 @@ fun PdfImportPreviewDialog(
                     // Customer Editable Header Section
                     item {
                         Card(
-                            colors = CardDefaults.cardColors(containerColor = Slate100),
+                            colors = CardDefaults.cardColors(containerColor = c.cardElevated),
                             shape = RoundedCornerShape(14.dp),
                             modifier = Modifier.fillMaxWidth()
                         ) {
@@ -294,7 +322,7 @@ fun PdfImportPreviewDialog(
                                     Icon(
                                         imageVector = Icons.Default.Person,
                                         contentDescription = null,
-                                        tint = GreenPrimary,
+                                        tint = c.greenPrimary,
                                         modifier = Modifier.size(18.dp)
                                     )
                                     Spacer(modifier = Modifier.width(6.dp))
@@ -302,7 +330,7 @@ fun PdfImportPreviewDialog(
                                         text = "Customer Info",
                                         fontSize = 13.sp,
                                         fontWeight = FontWeight.Bold,
-                                        color = Slate800
+                                        color = c.textPrimary
                                     )
                                 }
 
@@ -311,18 +339,20 @@ fun PdfImportPreviewDialog(
                                 OutlinedTextField(
                                     value = currentItem.customerName,
                                     onValueChange = { onCustomerNameChanged(selectedFileIndex, it) },
-                                    label = { Text("Customer Name *") },
+                                    label = { Text("Customer Name *", color = c.textSecondary) },
                                     isError = currentItem.customerName.isBlank(),
-                                    leadingIcon = { Icon(Icons.Default.Edit, contentDescription = null, tint = if (currentItem.customerName.isBlank()) RedDebit else GreenPrimary) },
+                                    leadingIcon = { Icon(Icons.Default.Edit, contentDescription = null, tint = if (currentItem.customerName.isBlank()) c.redDebit else c.greenPrimary) },
                                     singleLine = true,
                                     supportingText = if (currentItem.customerName.isBlank()) {
-                                        { Text("⚠️ Customer name required before importing", color = RedDebit, fontSize = 11.sp, fontWeight = FontWeight.SemiBold) }
+                                        { Text("Customer name required before importing", color = c.redDebit, fontSize = 11.sp, fontWeight = FontWeight.SemiBold) }
                                     } else null,
                                     colors = OutlinedTextFieldDefaults.colors(
-                                        focusedBorderColor = GreenPrimary,
-                                        unfocusedBorderColor = if (currentItem.customerName.isBlank()) RedDebit else Slate300,
-                                        focusedContainerColor = Color.White,
-                                        unfocusedContainerColor = Color.White
+                                        focusedBorderColor = c.greenPrimary,
+                                        unfocusedBorderColor = if (currentItem.customerName.isBlank()) c.redDebit else c.borderStrong,
+                                        focusedTextColor = c.textPrimary,
+                                        unfocusedTextColor = c.textPrimary,
+                                        focusedContainerColor = c.card,
+                                        unfocusedContainerColor = c.card
                                     ),
                                     shape = RoundedCornerShape(10.dp),
                                     modifier = Modifier.fillMaxWidth()
@@ -332,15 +362,17 @@ fun PdfImportPreviewDialog(
                                 OutlinedTextField(
                                     value = currentItem.mobileNumber,
                                     onValueChange = { onMobileNumberChanged(selectedFileIndex, it) },
-                                    label = { Text("Mobile Number (Optional)") },
-                                    leadingIcon = { Icon(Icons.Default.Phone, contentDescription = null, tint = Slate500) },
+                                    label = { Text("Mobile Number (Optional)", color = c.textSecondary) },
+                                    leadingIcon = { Icon(Icons.Default.Phone, contentDescription = null, tint = c.textMuted) },
                                     singleLine = true,
                                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
                                     colors = OutlinedTextFieldDefaults.colors(
-                                        focusedBorderColor = GreenPrimary,
-                                        unfocusedBorderColor = Slate300,
-                                        focusedContainerColor = Color.White,
-                                        unfocusedContainerColor = Color.White
+                                        focusedBorderColor = c.greenPrimary,
+                                        unfocusedBorderColor = c.borderStrong,
+                                        focusedTextColor = c.textPrimary,
+                                        unfocusedTextColor = c.textPrimary,
+                                        focusedContainerColor = c.card,
+                                        unfocusedContainerColor = c.card
                                     ),
                                     shape = RoundedCornerShape(10.dp),
                                     modifier = Modifier.fillMaxWidth()
@@ -363,7 +395,7 @@ fun PdfImportPreviewDialog(
                                     text = "Transactions (${currentItem.transactions.size})",
                                     fontSize = 14.sp,
                                     fontWeight = FontWeight.Bold,
-                                    color = Slate900
+                                    color = c.textPrimary
                                 )
 
                                 val totalReceived = currentItem.transactions
@@ -377,14 +409,14 @@ fun PdfImportPreviewDialog(
                                     text = "Rec: ₹${String.format(Locale.US, "%.0f", totalReceived)} | Paid: ₹${String.format(Locale.US, "%.0f", totalPaid)}",
                                     fontSize = 11.sp,
                                     fontWeight = FontWeight.SemiBold,
-                                    color = Slate600
+                                    color = c.textSecondary
                                 )
                             }
 
                             // Add Transaction Button
                             Button(
                                 onClick = { onAddTransaction(selectedFileIndex) },
-                                colors = ButtonDefaults.buttonColors(containerColor = GreenLight, contentColor = GreenPrimary),
+                                colors = ButtonDefaults.buttonColors(containerColor = c.greenTint, contentColor = c.greenPrimary),
                                 shape = RoundedCornerShape(8.dp),
                                 contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
                                 modifier = Modifier.height(36.dp)
@@ -399,7 +431,7 @@ fun PdfImportPreviewDialog(
                         if (currentItem.transactions.isEmpty()) {
                             item {
                                 Card(
-                                    colors = CardDefaults.cardColors(containerColor = Color(0xFFFFF8E1)),
+                                    colors = CardDefaults.cardColors(containerColor = c.amberTint),
                                     shape = RoundedCornerShape(12.dp),
                                     modifier = Modifier.fillMaxWidth()
                                 ) {
@@ -410,7 +442,7 @@ fun PdfImportPreviewDialog(
                                         Icon(
                                             imageVector = Icons.AutoMirrored.Filled.ReceiptLong,
                                             contentDescription = null,
-                                            tint = Color(0xFFF57F17),
+                                            tint = c.amberAccent,
                                             modifier = Modifier.size(32.dp)
                                         )
                                         Spacer(modifier = Modifier.height(6.dp))
@@ -418,13 +450,13 @@ fun PdfImportPreviewDialog(
                                             text = "No transactions fetched automatically",
                                             fontSize = 13.sp,
                                             fontWeight = FontWeight.Bold,
-                                            color = Slate900
+                                            color = c.textPrimary
                                         )
                                         Spacer(modifier = Modifier.height(2.dp))
                                         Text(
                                             text = "Click '+ Add Tx' above to manually add transactions.",
                                             fontSize = 12.sp,
-                                            color = Slate600,
+                                            color = c.textSecondary,
                                             textAlign = androidx.compose.ui.text.style.TextAlign.Center
                                         )
                                     }
@@ -458,11 +490,12 @@ fun PdfImportPreviewDialog(
                     OutlinedButton(
                         onClick = onDismiss,
                         shape = RoundedCornerShape(12.dp),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, c.borderStrong),
                         modifier = Modifier
                             .weight(1f)
                             .height(48.dp)
                     ) {
-                        Text("Cancel", fontWeight = FontWeight.SemiBold, color = Slate600)
+                        Text(s.cancel, fontWeight = FontWeight.SemiBold, color = c.textSecondary)
                     }
 
                     val validItemsCount = previewItems.count {
@@ -476,8 +509,8 @@ fun PdfImportPreviewDialog(
                         },
                         enabled = validItemsCount > 0,
                         colors = ButtonDefaults.buttonColors(
-                            containerColor = GreenPrimary,
-                            disabledContainerColor = Slate300
+                            containerColor = c.greenPrimary,
+                            disabledContainerColor = c.borderStrong
                         ),
                         shape = RoundedCornerShape(12.dp),
                         modifier = Modifier
@@ -510,10 +543,11 @@ fun PreviewTransactionRow(
     onTypeToggled: () -> Unit,
     onDelete: () -> Unit
 ) {
+    val c = LedgerTheme.colors
     Card(
-        colors = CardDefaults.cardColors(containerColor = Color.White),
+        colors = CardDefaults.cardColors(containerColor = c.card),
         shape = RoundedCornerShape(12.dp),
-        border = androidx.compose.foundation.BorderStroke(1.dp, Slate200),
+        border = androidx.compose.foundation.BorderStroke(1.dp, c.border),
         modifier = Modifier.fillMaxWidth()
     ) {
         Column(modifier = Modifier.padding(10.dp)) {
@@ -525,7 +559,7 @@ fun PreviewTransactionRow(
                 Surface(
                     onClick = onTypeToggled,
                     shape = RoundedCornerShape(8.dp),
-                    color = if (tx.transactionType == "I_RECEIVED") GreenLight else Color(0xFFFFEBEE),
+                    color = if (tx.transactionType == "I_RECEIVED") c.greenTint else c.redTint,
                     modifier = Modifier.wrapContentSize()
                 ) {
                     Row(
@@ -535,7 +569,7 @@ fun PreviewTransactionRow(
                         Icon(
                             imageVector = if (tx.transactionType == "I_RECEIVED") Icons.Default.ArrowDownward else Icons.Default.ArrowUpward,
                             contentDescription = null,
-                            tint = if (tx.transactionType == "I_RECEIVED") GreenPrimary else RedDebit,
+                            tint = if (tx.transactionType == "I_RECEIVED") c.greenPrimary else c.redDebit,
                             modifier = Modifier.size(14.dp)
                         )
                         Spacer(modifier = Modifier.width(4.dp))
@@ -543,7 +577,7 @@ fun PreviewTransactionRow(
                             text = if (tx.transactionType == "I_RECEIVED") "RECEIVED" else "PAID",
                             fontSize = 10.sp,
                             fontWeight = FontWeight.ExtraBold,
-                            color = if (tx.transactionType == "I_RECEIVED") GreenPrimary else RedDebit
+                            color = if (tx.transactionType == "I_RECEIVED") c.greenPrimary else c.redDebit
                         )
                     }
                 }
@@ -556,13 +590,15 @@ fun PreviewTransactionRow(
                     onValueChange = onDateChanged,
                     singleLine = true,
                     colors = OutlinedTextFieldDefaults.colors(
-                        focusedBorderColor = GreenPrimary,
-                        unfocusedBorderColor = Slate200,
-                        focusedContainerColor = Slate100,
+                        focusedBorderColor = c.greenPrimary,
+                        unfocusedBorderColor = c.border,
+                        focusedTextColor = c.textPrimary,
+                        unfocusedTextColor = c.textSecondary,
+                        focusedContainerColor = c.surfaceSubtle,
                         unfocusedContainerColor = Color.Transparent
                     ),
                     shape = RoundedCornerShape(8.dp),
-                    textStyle = androidx.compose.ui.text.TextStyle(fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Slate700),
+                    textStyle = androidx.compose.ui.text.TextStyle(fontSize = 11.sp, fontWeight = FontWeight.Bold, color = c.textSecondary),
                     modifier = Modifier
                         .weight(1f)
                         .height(44.dp)
@@ -574,17 +610,19 @@ fun PreviewTransactionRow(
                 OutlinedTextField(
                     value = tx.amountText,
                     onValueChange = onAmountChanged,
-                    prefix = { Text("₹", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Slate700) },
+                    prefix = { Text("₹", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = c.textSecondary) },
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                     colors = OutlinedTextFieldDefaults.colors(
-                        focusedBorderColor = GreenPrimary,
-                        unfocusedBorderColor = Slate300,
-                        focusedContainerColor = Slate100,
-                        unfocusedContainerColor = Slate100
+                        focusedBorderColor = c.greenPrimary,
+                        unfocusedBorderColor = c.borderStrong,
+                        focusedTextColor = c.textPrimary,
+                        unfocusedTextColor = c.textPrimary,
+                        focusedContainerColor = c.surfaceSubtle,
+                        unfocusedContainerColor = c.surfaceSubtle
                     ),
                     shape = RoundedCornerShape(8.dp),
-                    textStyle = androidx.compose.ui.text.TextStyle(fontSize = 13.sp, fontWeight = FontWeight.Bold, color = Slate900),
+                    textStyle = androidx.compose.ui.text.TextStyle(fontSize = 13.sp, fontWeight = FontWeight.Bold, color = c.textPrimary),
                     modifier = Modifier
                         .widthIn(min = 70.dp, max = 110.dp)
                         .weight(0.85f)
@@ -599,7 +637,7 @@ fun PreviewTransactionRow(
                     Icon(
                         imageVector = Icons.Default.DeleteOutline,
                         contentDescription = "Delete Row",
-                        tint = Slate400,
+                        tint = c.textMuted,
                         modifier = Modifier.size(18.dp)
                     )
                 }
@@ -611,16 +649,18 @@ fun PreviewTransactionRow(
             OutlinedTextField(
                 value = tx.comment,
                 onValueChange = onCommentChanged,
-                placeholder = { Text("Add notes / transaction description", fontSize = 11.sp, color = Slate400) },
+                placeholder = { Text("Add notes / transaction description", fontSize = 11.sp, color = c.textMuted) },
                 singleLine = true,
                 colors = OutlinedTextFieldDefaults.colors(
-                    focusedBorderColor = GreenPrimary,
-                    unfocusedBorderColor = Slate200,
-                    focusedContainerColor = Slate100,
-                    unfocusedContainerColor = Slate100
+                    focusedBorderColor = c.greenPrimary,
+                    unfocusedBorderColor = c.border,
+                    focusedTextColor = c.textPrimary,
+                    unfocusedTextColor = c.textPrimary,
+                    focusedContainerColor = c.surfaceSubtle,
+                    unfocusedContainerColor = c.surfaceSubtle
                 ),
                 shape = RoundedCornerShape(6.dp),
-                textStyle = androidx.compose.ui.text.TextStyle(fontSize = 11.sp, color = Slate800),
+                textStyle = androidx.compose.ui.text.TextStyle(fontSize = 11.sp, color = c.textPrimary),
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(42.dp)
@@ -634,13 +674,13 @@ fun PreviewTransactionRow(
                     verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .background(Color(0xFFFFEBEE), RoundedCornerShape(6.dp))
+                        .background(c.redTint, RoundedCornerShape(6.dp))
                         .padding(horizontal = 8.dp, vertical = 4.dp)
                 ) {
                     Icon(
                         imageVector = Icons.Default.ErrorOutline,
                         contentDescription = null,
-                        tint = RedDebit,
+                        tint = c.redDebit,
                         modifier = Modifier.size(14.dp)
                     )
                     Spacer(modifier = Modifier.width(4.dp))
@@ -648,7 +688,7 @@ fun PreviewTransactionRow(
                         text = tx.errorMessage ?: if (parsedAmt <= 0.0) "Invalid amount (₹0.00). Please enter amount above." else "Transaction error",
                         fontSize = 11.sp,
                         fontWeight = FontWeight.Bold,
-                        color = RedDebit
+                        color = c.redDebit
                     )
                 }
             }
@@ -668,14 +708,14 @@ fun PreviewTransactionRow(
                             modifier = Modifier
                                 .size(36.dp)
                                 .clip(RoundedCornerShape(6.dp))
-                                .border(1.dp, Slate300, RoundedCornerShape(6.dp))
+                                .border(1.dp, c.borderStrong, RoundedCornerShape(6.dp))
                         )
                     }
                     Text(
-                        text = "📷 ${paths.size} image${if (paths.size > 1) "s" else ""} attached",
+                        text = "${paths.size} image${if (paths.size > 1) "s" else ""} attached",
                         fontSize = 10.sp,
                         fontWeight = FontWeight.SemiBold,
-                        color = Slate600
+                        color = c.textSecondary
                     )
                 }
             }

@@ -13,6 +13,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -24,20 +25,25 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.text.style.TextOverflow
 import com.example.ui.DailyExpenseViewModel
 import com.example.ui.theme.*
+import com.example.utils.LocalAppStrings
 import java.text.SimpleDateFormat
 import java.util.*
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun ReportsScreen(
-    viewModel: DailyExpenseViewModel
+    viewModel: DailyExpenseViewModel,
+    onOpenMenu: (() -> Unit)? = null
 ) {
+    val c = LedgerTheme.colors
+    val s = LocalAppStrings.current
     val context = LocalContext.current
-    val dashboardSummary by viewModel.dashboardSummary.collectAsState()
-    val allTransactions by viewModel.allTransactions.collectAsState()
-    val allExpenses by viewModel.allExpenses.collectAsState()
+    val dashboardSummary by viewModel.dashboardSummary.collectAsStateWithLifecycle()
+    val allTransactions by viewModel.allTransactions.collectAsStateWithLifecycle()
+    val allExpenses by viewModel.allExpenses.collectAsStateWithLifecycle()
 
     var selectedReportMonthYear by remember { mutableStateOf("2026-07") } // YYYY-MM
     var showMonthPickerModal by remember { mutableStateOf(false) }
@@ -62,12 +68,12 @@ fun ReportsScreen(
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .background(Color.White)
+            .background(c.background)
     ) {
         // Top Green Header with Rounded Bottom and Centered Heading
         Surface(
             shape = RoundedCornerShape(bottomStart = 20.dp, bottomEnd = 20.dp),
-            color = GreenPrimary,
+            color = c.brandHeader,
             shadowElevation = 4.dp,
             modifier = Modifier.fillMaxWidth()
         ) {
@@ -75,15 +81,30 @@ fun ReportsScreen(
                 modifier = Modifier
                     .fillMaxWidth()
                     .statusBarsPadding()
-                    .padding(vertical = 20.dp, horizontal = 16.dp),
-                contentAlignment = Alignment.Center
+                    .padding(vertical = 16.dp, horizontal = 12.dp)
             ) {
+                if (onOpenMenu != null) {
+                    IconButton(
+                        onClick = onOpenMenu,
+                        modifier = Modifier
+                            .align(Alignment.CenterStart)
+                            .size(48.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Menu,
+                            contentDescription = "Open Menu",
+                            tint = Color.White,
+                            modifier = Modifier.size(24.dp)
+                        )
+                    }
+                }
                 Text(
-                    text = "Financial Reports & Analytics",
+                    text = s.financialReportsTitle,
                     fontSize = 20.sp,
                     fontWeight = FontWeight.Bold,
                     color = Color.White,
-                    textAlign = TextAlign.Center
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.align(Alignment.Center)
                 )
             }
         }
@@ -99,31 +120,33 @@ fun ReportsScreen(
             // Month Selector Card
             Card(
                 shape = RoundedCornerShape(16.dp),
-                colors = CardDefaults.cardColors(containerColor = SurfaceBackground),
+                colors = CardDefaults.cardColors(containerColor = c.card),
+                border = androidx.compose.foundation.BorderStroke(1.dp, c.border),
                 elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
                 modifier = Modifier.fillMaxWidth()
             ) {
-                Row(
+                FlowRow(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(16.dp),
                     horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     Column {
-                        Text("Select Report Month", fontSize = 12.sp, color = Slate500, fontWeight = FontWeight.SemiBold)
+                        Text("Select Report Month", fontSize = 12.sp, color = c.textMuted, fontWeight = FontWeight.SemiBold)
                         Text(
                             text = formatReadableMonth(selectedReportMonthYear),
                             fontSize = 18.sp,
                             fontWeight = FontWeight.ExtraBold,
-                            color = GreenPrimary
+                            color = c.greenPrimary
                         )
                     }
 
                     Button(
                         onClick = { showMonthPickerModal = true },
-                        colors = ButtonDefaults.buttonColors(containerColor = GreenPrimary),
-                        shape = RoundedCornerShape(10.dp)
+                        colors = ButtonDefaults.buttonColors(containerColor = c.greenPrimary),
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier.heightIn(min = 48.dp)
                     ) {
                         Icon(Icons.Default.CalendarMonth, contentDescription = null, modifier = Modifier.size(16.dp))
                         Spacer(modifier = Modifier.width(6.dp))
@@ -135,8 +158,8 @@ fun ReportsScreen(
             // Month Breakdown Overview
             Card(
                 shape = RoundedCornerShape(20.dp),
-                colors = CardDefaults.cardColors(containerColor = Color.White),
-                border = androidx.compose.foundation.BorderStroke(1.dp, Slate200),
+                colors = CardDefaults.cardColors(containerColor = c.card),
+                border = androidx.compose.foundation.BorderStroke(1.dp, c.border),
                 elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
                 modifier = Modifier.fillMaxWidth()
             ) {
@@ -145,22 +168,20 @@ fun ReportsScreen(
                         text = "Statement for ${formatReadableMonth(selectedReportMonthYear)}",
                         fontSize = 16.sp,
                         fontWeight = FontWeight.Bold,
-                        color = Slate900
+                        color = c.textPrimary
                     )
 
                     Spacer(modifier = Modifier.height(14.dp))
 
-                    SummaryRow(title = "Monthly Expense Items", amount = monthExpenses.size.toDouble(), isCount = true)
-                    HorizontalDivider(modifier = Modifier.padding(vertical = 10.dp), color = Slate200)
-                    SummaryRow(title = "Total Monthly Store Deductions", amount = monthExpensesTotal, color = RedDebit)
-                    HorizontalDivider(modifier = Modifier.padding(vertical = 10.dp), color = Slate200)
-                    SummaryRow(title = "Overall Outstanding (You Get)", amount = dashboardSummary.totalYouWillReceive, color = GreenPrimary)
-                    HorizontalDivider(modifier = Modifier.padding(vertical = 10.dp), color = Slate200)
-                    SummaryRow(title = "Overall Payable (You Give)", amount = dashboardSummary.totalYouNeedToPay, color = RedDebit)
+                    SummaryRow(title = "Monthly Expense Items", amount = monthExpenses.size.toDouble(), color = c.textPrimary, isCount = true)
+                    HorizontalDivider(modifier = Modifier.padding(vertical = 10.dp), color = c.divider)
+                    SummaryRow(title = s.totalSpent, amount = monthExpensesTotal, color = c.redDebit)
+                    HorizontalDivider(modifier = Modifier.padding(vertical = 10.dp), color = c.divider)
+                    SummaryRow(title = "Overall Outstanding (${s.youllGet})", amount = dashboardSummary.totalYouWillReceive, color = c.greenPrimary)
+                    HorizontalDivider(modifier = Modifier.padding(vertical = 10.dp), color = c.divider)
+                    SummaryRow(title = "Overall Payable (${s.youGave})", amount = dashboardSummary.totalYouNeedToPay, color = c.redDebit)
                 }
             }
-
-
 
             // Download / Export Month Report Action
             Button(
@@ -193,19 +214,21 @@ fun ReportsScreen(
                         Toast.makeText(context, "Error generating PDF report: ${e.message}", Toast.LENGTH_SHORT).show()
                     }
                 },
-                colors = ButtonDefaults.buttonColors(containerColor = GreenPrimary),
+                colors = ButtonDefaults.buttonColors(containerColor = c.greenPrimary),
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(52.dp),
+                    .heightIn(min = 52.dp),
                 shape = RoundedCornerShape(14.dp)
             ) {
                 Icon(Icons.Default.Download, contentDescription = null, tint = Color.White)
                 Spacer(modifier = Modifier.width(8.dp))
                 Text(
                     text = "Download ${formatReadableMonth(selectedReportMonthYear)} Report PDF",
-                    fontSize = 15.sp,
+                    fontSize = 14.sp,
                     fontWeight = FontWeight.ExtraBold,
-                    color = Color.White
+                    color = Color.White,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
                 )
             }
         }
@@ -223,14 +246,14 @@ fun ReportsScreen(
 
         AlertDialog(
             onDismissRequest = { showMonthPickerModal = false },
-            containerColor = Color.White,
+            containerColor = c.card,
             shape = RoundedCornerShape(20.dp),
             properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false),
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(horizontal = 15.dp),
             title = {
-                Text("Select Report Month & Year", fontSize = 18.sp, fontWeight = FontWeight.ExtraBold, color = Slate900)
+                Text("Select Report Month & Year", fontSize = 18.sp, fontWeight = FontWeight.ExtraBold, color = c.textPrimary)
             },
             text = {
                 Column(
@@ -241,24 +264,24 @@ fun ReportsScreen(
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .background(SurfaceBackground, RoundedCornerShape(12.dp))
+                            .background(c.surfaceSubtle, RoundedCornerShape(12.dp))
                             .padding(8.dp),
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         IconButton(onClick = { tempYear -= 1 }) {
-                            Icon(Icons.Default.ChevronLeft, contentDescription = null, tint = GreenPrimary)
+                            Icon(Icons.Default.ChevronLeft, contentDescription = null, tint = c.greenPrimary)
                         }
 
                         Text(
                             text = tempYear.toString(),
                             fontSize = 20.sp,
                             fontWeight = FontWeight.ExtraBold,
-                            color = GreenPrimary
+                            color = c.greenPrimary
                         )
 
                         IconButton(onClick = { tempYear += 1 }) {
-                            Icon(Icons.Default.ChevronRight, contentDescription = null, tint = GreenPrimary)
+                            Icon(Icons.Default.ChevronRight, contentDescription = null, tint = c.greenPrimary)
                         }
                     }
 
@@ -273,8 +296,10 @@ fun ReportsScreen(
                                 onClick = { tempYear = y },
                                 label = { Text(y.toString(), fontSize = 11.sp, fontWeight = FontWeight.Bold) },
                                 colors = FilterChipDefaults.filterChipColors(
-                                    selectedContainerColor = GreenPrimary,
-                                    selectedLabelColor = Color.White
+                                    selectedContainerColor = c.greenPrimary,
+                                    selectedLabelColor = Color.White,
+                                    containerColor = c.surfaceSubtle,
+                                    labelColor = c.textSecondary
                                 )
                             )
                         }
@@ -287,12 +312,12 @@ fun ReportsScreen(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
-                                for (c in 0..2) {
-                                    val idx = r * 3 + c
+                                for (col in 0..2) {
+                                    val idx = r * 3 + col
                                     val isSel = idx == tempMonthIdx
                                     Surface(
                                         shape = RoundedCornerShape(10.dp),
-                                        color = if (isSel) GreenPrimary else SurfaceBackground,
+                                        color = if (isSel) c.greenPrimary else c.surfaceSubtle,
                                         modifier = Modifier
                                             .weight(1f)
                                             .clip(RoundedCornerShape(10.dp))
@@ -306,7 +331,7 @@ fun ReportsScreen(
                                                 text = monthsNames[idx],
                                                 fontSize = 13.sp,
                                                 fontWeight = FontWeight.ExtraBold,
-                                                color = if (isSel) Color.White else Slate900
+                                                color = if (isSel) Color.White else c.textPrimary
                                             )
                                         }
                                     }
@@ -323,14 +348,14 @@ fun ReportsScreen(
                         selectedReportMonthYear = "$tempYear-$mStr"
                         showMonthPickerModal = false
                     },
-                    colors = ButtonDefaults.buttonColors(containerColor = GreenPrimary)
+                    colors = ButtonDefaults.buttonColors(containerColor = c.greenPrimary)
                 ) {
-                    Text("Select Report Period", fontWeight = FontWeight.Bold, color = Color.White)
+                    Text(s.done, fontWeight = FontWeight.Bold, color = Color.White)
                 }
             },
             dismissButton = {
                 TextButton(onClick = { showMonthPickerModal = false }) {
-                    Text("Cancel", color = Slate500)
+                    Text(s.cancel, color = c.textMuted)
                 }
             }
         )
@@ -338,13 +363,14 @@ fun ReportsScreen(
 }
 
 @Composable
-fun SummaryRow(title: String, amount: Double, color: Color = Slate900, isCount: Boolean = false) {
+fun SummaryRow(title: String, amount: Double, color: Color = LedgerTheme.colors.textPrimary, isCount: Boolean = false) {
+    val c = LedgerTheme.colors
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Text(title, fontSize = 14.sp, fontWeight = FontWeight.Medium, color = Slate700)
+        Text(title, fontSize = 14.sp, fontWeight = FontWeight.Medium, color = c.textSecondary)
         Text(
             text = if (isCount) "${amount.toInt()} items" else String.format("₹ %,.2f", amount),
             fontSize = 15.sp,

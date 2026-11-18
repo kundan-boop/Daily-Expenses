@@ -257,6 +257,49 @@ class AuthViewModel(application: Application) : AndroidViewModel(application) {
         )
     }
 
+    fun hasExistingCustomProfile(): Boolean {
+        val cur = _userProfile.value
+        val hasCustomFields = cur.name != "Kundan Sinh" ||
+            cur.phone != "1234567890" ||
+            cur.email != "Store@gmail.com" ||
+            cur.businessName != "General Store" ||
+            !cur.profileImageUri.isNullOrBlank()
+        return hasCustomFields
+    }
+
+    fun applyRestoredProfile(
+        name: String,
+        businessName: String,
+        phone: String,
+        email: String,
+        profileImagePath: String?
+    ) {
+        val cur = _userProfile.value
+        val finalName = name.ifBlank { cur.name }
+        val finalBusiness = businessName.ifBlank { cur.businessName }
+        val finalPhone = phone.ifBlank { cur.phone }
+        val finalEmail = email.ifBlank { cur.email }
+        val finalImage = profileImagePath?.ifBlank { null } ?: cur.profileImageUri
+
+        val editor = prefs.edit()
+            .putString("user_name", finalName)
+            .putString("business_name", finalBusiness)
+            .putString("user_phone", finalPhone)
+            .putString("user_email", finalEmail)
+        if (!finalImage.isNullOrBlank()) {
+            editor.putString("profile_image_uri", finalImage)
+        }
+        editor.apply()
+
+        _userProfile.value = cur.copy(
+            name = finalName,
+            businessName = finalBusiness,
+            phone = finalPhone,
+            email = finalEmail,
+            profileImageUri = finalImage
+        )
+    }
+
     fun setPin(pin: String, enabled: Boolean) {
         prefs.edit()
             .putString("pin_code", pin)

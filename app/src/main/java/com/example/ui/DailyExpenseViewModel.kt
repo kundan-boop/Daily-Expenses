@@ -7,9 +7,16 @@ import androidx.paging.Pager
 import androidx.paging.PagingConfig
 import androidx.paging.PagingData
 import androidx.paging.cachedIn
+import androidx.paging.insertSeparators
+import androidx.paging.map
 import com.example.data.*
+import com.example.utils.SummaryAnchor
+import com.example.utils.SummaryGranularity
+import com.example.utils.SummaryPeriodHelper
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.*
 
@@ -37,9 +44,12 @@ data class DashboardSummary(
     val totalYouNeedToPay: Double = 0.0,
     val totalExpenses: Double = 0.0,
     val totalBalance: Double = 0.0,
-    val totalCustomersCount: Int = 0,
-    val thisMonthCollection: Double = 0.0,
-    val todayCollection: Double = 0.0
+    val totalCustomersCount: Int = 0
+)
+
+data class RecentTransactionEntry(
+    val transaction: TransactionEntity,
+    val customer: CustomerEntity
 )
 
 data class PdfImportProgressState(
@@ -47,6 +57,63 @@ data class PdfImportProgressState(
     val totalCount: Int = 0,
     val currentCustomerName: String = ""
 )
+
+data class SummaryChartPoint(
+    val bucketKey: String,
+    val xLabel: String,
+    val fullLabel: String,
+    val totalPaid: Double,
+    val totalReceived: Double,
+    val netChange: Double,
+    val cumulativeBalance: Double,
+    val entryCount: Int,
+    val isCurrentOrSelected: Boolean = false,
+    val isHighest: Boolean = false,
+    val isLowest: Boolean = false
+)
+
+data class SummaryPeriodOverview(
+    val totalPaid: Double = 0.0,
+    val totalReceived: Double = 0.0,
+    val netBalance: Double = 0.0,
+    val entryCount: Int = 0,
+    val customerCount: Int = 0,
+    val highestLabel: String? = null,
+    val highestAmount: Double = 0.0
+)
+
+data class SummaryChartUiState(
+    val isLoading: Boolean = true,
+    val granularity: SummaryGranularity = SummaryGranularity.MONTHLY,
+    val anchor: SummaryAnchor = SummaryAnchor.today(),
+    val periodLabel: String = "",
+    val canStepForward: Boolean = false,
+    val overview: SummaryPeriodOverview = SummaryPeriodOverview(),
+    val points: List<SummaryChartPoint> = emptyList(),
+    val selectedBucketKey: String? = null,
+    val drillDownBucketKey: String? = null,
+    val drillDownLabel: String? = null
+)
+
+data class SummaryTopOverviewState(
+    val selectedTab: Int = 0, // 0=Overall(Today/ThisMonth/ThisYear), 1=Daily, 2=Monthly, 3=Yearly
+    val anchor: SummaryAnchor = SummaryAnchor.today(),
+    val dailyTotals: SummaryPeriodTotalsTuple = SummaryPeriodTotalsTuple(0.0, 0.0, 0, 0),
+    val monthlyTotals: SummaryPeriodTotalsTuple = SummaryPeriodTotalsTuple(0.0, 0.0, 0, 0),
+    val yearlyTotals: SummaryPeriodTotalsTuple = SummaryPeriodTotalsTuple(0.0, 0.0, 0, 0)
+)
+
+sealed class SummaryEntryListItem {
+    data class GroupHeader(
+        val groupKey: String,
+        val title: String,
+        val granularity: SummaryGranularity
+    ) : SummaryEntryListItem()
+
+    data class EntryRow(
+        val tuple: SummaryTransactionTuple
+    ) : SummaryEntryListItem()
+}
 
 class DailyExpenseViewModel(application: Application) : AndroidViewModel(application) {
     private val repository: DailyExpenseRepository
@@ -68,11 +135,273 @@ class DailyExpenseViewModel(application: Application) : AndroidViewModel(applica
 
     val backupStatus: StateFlow<com.example.utils.DriveBackupStatus> = com.example.utils.BackupManager.backupStatusFlow
 
+    // Isolated Firebase Cloud Backup & Google Account connection states
+    val firebaseBackupStatus: StateFlow<com.example.utils.FirebaseBackupStatus> =
+        com.example.utils.AppPreferencesManager.firebaseBackupStatusFlow
+
+    private val _firebaseBackupsList = MutableStateFlow<List<com.example.data.remote.FirebaseBackupSnapshot>>(emptyList())
+    val firebaseBackupsList: StateFlow<List<com.example.data.remote.FirebaseBackupSnapshot>> = _firebaseBackupsList.asStateFlow()
+
+    private val _isFirebaseBusy = MutableStateFlow(false)
+    val isFirebaseBusy: StateFlow<Boolean> = _isFirebaseBusy.asStateFlow()
+
+    private val _firebaseConnectionMessage = MutableStateFlow<String?>(null)
+    val firebaseConnectionMessage: StateFlow<String?> = _firebaseConnectionMessage.asStateFlow()
+
+    private val _googleAccountInfo = MutableStateFlow<com.example.auth.GoogleSignInAccountInfo?>(
+        com.example.auth.GoogleAuthHelper.getCurrentAccountInfo()
+    )
+    val googleAccountInfo: StateFlow<com.example.auth.GoogleSignInAccountInfo?> = _googleAccountInfo.asStateFlow()
+
+    data class PendingProfileRestore(
+        val name: String,
+        val businessName: String,
+        val phone: String,
+        val email: String,
+        val profileImageBase64: String?
+    )
+
+    data class FullBackupRestoreSummary(
+        val success: Boolean,
+        val customersAdded: Int = 0,
+        val transactionsAdded: Int = 0,
+        val expensesAdded: Int = 0,
+        val hasProfileInBackup: Boolean = false,
+        val errorMessage: String? = null
+    )
+
+    private val _pendingProfileRestore = MutableStateFlow<PendingProfileRestore?>(null)
+    val pendingProfileRestore: StateFlow<PendingProfileRestore?> = _pendingProfileRestore.asStateFlow()
+
+    fun refreshFirebaseState() {
+        val account = com.example.auth.GoogleAuthHelper.getCurrentAccountInfo()
+        _googleAccountInfo.value = account
+        val ctx = getApplication<Application>()
+        if (account == null) {
+            _firebaseBackupsList.value = emptyList()
+            com.example.utils.AppPreferencesManager.refreshFirebaseStatus(
+                context = ctx,
+                isSignedIn = false,
+                userEmail = null,
+                snapshotCount = 0
+            )
+            return
+        }
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            try {
+                if (com.google.firebase.FirebaseApp.getApps(ctx).isNotEmpty()) {
+                    val repo = com.example.data.remote.FirebaseBackupRepository(ctx)
+                    val listRes = repo.listBackups()
+                    listRes.onSuccess { list ->
+                        _firebaseBackupsList.value = list
+                        com.example.utils.AppPreferencesManager.refreshFirebaseStatus(
+                            context = ctx,
+                            isSignedIn = true,
+                            userEmail = account.email,
+                            snapshotCount = list.size
+                        )
+                    }.onFailure { err ->
+                        com.example.utils.AppPreferencesManager.refreshFirebaseStatus(
+                            context = ctx,
+                            isSignedIn = true,
+                            userEmail = account.email
+                        )
+                        _firebaseConnectionMessage.value = err.localizedMessage
+                    }
+                }
+            } catch (e: Exception) {
+                _firebaseConnectionMessage.value = e.localizedMessage
+            }
+        }
+    }
+
+    fun onGoogleAccountSignedIn() {
+        val account = com.example.auth.GoogleAuthHelper.getCurrentAccountInfo()
+        _googleAccountInfo.value = account
+        val ctx = getApplication<Application>()
+        com.example.utils.AppPreferencesManager.refreshFirebaseStatus(
+            context = ctx,
+            isSignedIn = account != null,
+            userEmail = account?.email
+        )
+        refreshFirebaseState()
+    }
+
+    fun signOutGoogleAccount(onDone: (() -> Unit)? = null) {
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            val ctx = getApplication<Application>()
+            com.example.auth.GoogleAuthHelper.signOut(ctx)
+            _googleAccountInfo.value = null
+            _firebaseBackupsList.value = emptyList()
+            _firebaseConnectionMessage.value = "Signed out of Google cloud backup account. Local ledger stays active offline."
+            com.example.utils.AppPreferencesManager.refreshFirebaseStatus(
+                context = ctx,
+                isSignedIn = false,
+                userEmail = null,
+                snapshotCount = 0
+            )
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                onDone?.invoke()
+            }
+        }
+    }
+
+    fun testFirebaseConnection(onComplete: ((Boolean, String) -> Unit)? = null) {
+        val ctx = getApplication<Application>()
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            _isFirebaseBusy.value = true
+            try {
+                val repo = com.example.data.remote.FirebaseBackupRepository(ctx)
+                val res = repo.testConnection()
+                val ok = res.isSuccess
+                val msg = res.getOrElse { it.localizedMessage ?: "Firebase connection test failed" }
+                _firebaseConnectionMessage.value = msg
+                if (ok) refreshFirebaseState()
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                    onComplete?.invoke(ok, msg)
+                }
+            } catch (e: Exception) {
+                val msg = e.localizedMessage ?: "Firebase connection error"
+                _firebaseConnectionMessage.value = msg
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                    onComplete?.invoke(false, msg)
+                }
+            } finally {
+                _isFirebaseBusy.value = false
+            }
+        }
+    }
+
+    fun syncFirebaseBackupNow(onComplete: ((Boolean, String) -> Unit)? = null) {
+        val ctx = getApplication<Application>()
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            _isFirebaseBusy.value = true
+            try {
+                if (!com.example.utils.BackupManager.isFirebaseSignedIn(ctx)) {
+                    val msg = "Please sign in with Google in Settings -> Google Account first"
+                    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                        onComplete?.invoke(false, msg)
+                    }
+                    return@launch
+                }
+                if (!com.example.utils.BackupManager.isNetworkAvailable(ctx)) {
+                    com.example.utils.AppPreferencesManager.setPendingFirebaseBackup(ctx, true)
+                    com.example.utils.AppPreferencesManager.updateFirebaseStatus(
+                        context = ctx,
+                        state = com.example.utils.BackupState.PENDING_OFFLINE,
+                        errorMessage = "Offline: queued for automatic upload",
+                        userEmail = com.example.auth.GoogleAuthHelper.getCurrentAccountInfo()?.email
+                    )
+                    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                        onComplete?.invoke(false, "Offline: Firebase sync queued for reconnection")
+                    }
+                    return@launch
+                }
+                com.example.utils.AppPreferencesManager.updateFirebaseStatus(
+                    context = ctx,
+                    state = com.example.utils.BackupState.IN_PROGRESS,
+                    errorMessage = null,
+                    userEmail = com.example.auth.GoogleAuthHelper.getCurrentAccountInfo()?.email
+                )
+                val pkg = com.example.utils.BackupManager.exportFullBackupPackage(ctx)
+                if (pkg.jsonString.isBlank()) {
+                    throw IllegalStateException("Backup export is empty")
+                }
+                val repo = com.example.data.remote.FirebaseBackupRepository(ctx)
+                val res = repo.uploadDailyBackup(
+                    jsonString = pkg.jsonString,
+                    customerCount = pkg.customerCount,
+                    transactionCount = pkg.transactionCount,
+                    hasUserProfile = pkg.hasUserProfile
+                )
+                if (res.isSuccess) {
+                    val snapshots = repo.listBackups().getOrNull() ?: emptyList()
+                    _firebaseBackupsList.value = snapshots
+                    val now = System.currentTimeMillis()
+                    com.example.utils.AppPreferencesManager.setPendingFirebaseBackup(ctx, false)
+                    com.example.utils.AppPreferencesManager.updateFirebaseStatus(
+                        context = ctx,
+                        state = com.example.utils.BackupState.SUCCESS,
+                        timestamp = now,
+                        errorMessage = null,
+                        userEmail = com.example.auth.GoogleAuthHelper.getCurrentAccountInfo()?.email,
+                        snapshotCount = snapshots.size
+                    )
+                    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                        onComplete?.invoke(true, "Synced to Firebase Firestore (${snapshots.size} backup(s))")
+                    }
+                } else {
+                    val errMsg = res.exceptionOrNull()?.localizedMessage ?: "Firebase upload failed"
+                    com.example.utils.AppPreferencesManager.setPendingFirebaseBackup(ctx, true)
+                    com.example.utils.AppPreferencesManager.updateFirebaseStatus(
+                        context = ctx,
+                        state = com.example.utils.BackupState.FAILED,
+                        errorMessage = errMsg,
+                        userEmail = com.example.auth.GoogleAuthHelper.getCurrentAccountInfo()?.email
+                    )
+                    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                        onComplete?.invoke(false, errMsg)
+                    }
+                }
+            } catch (e: Exception) {
+                val errMsg = e.localizedMessage ?: "Firebase backup failed"
+                com.example.utils.AppPreferencesManager.updateFirebaseStatus(
+                    context = ctx,
+                    state = com.example.utils.BackupState.FAILED,
+                    errorMessage = errMsg
+                )
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                    onComplete?.invoke(false, errMsg)
+                }
+            } finally {
+                _isFirebaseBusy.value = false
+            }
+        }
+    }
+
+    fun restoreFirebaseBackup(
+        backupId: String,
+        authViewModel: AuthViewModel?,
+        onComplete: (FullBackupRestoreSummary) -> Unit
+    ) {
+        val ctx = getApplication<Application>()
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            _isFirebaseBusy.value = true
+            try {
+                val repo = com.example.data.remote.FirebaseBackupRepository(ctx)
+                val downloadRes = repo.downloadBackupJson(backupId)
+                if (downloadRes.isFailure) {
+                    val summary = FullBackupRestoreSummary(
+                        success = false,
+                        errorMessage = downloadRes.exceptionOrNull()?.localizedMessage ?: "Download failed"
+                    )
+                    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                        onComplete(summary)
+                    }
+                    return@launch
+                }
+                val json = downloadRes.getOrThrow()
+                val summary = performFullBackupImportInternal(json, authViewModel)
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                    onComplete(summary)
+                }
+            } catch (e: Exception) {
+                val summary = FullBackupRestoreSummary(success = false, errorMessage = e.localizedMessage)
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                    onComplete(summary)
+                }
+            } finally {
+                _isFirebaseBusy.value = false
+            }
+        }
+    }
+
     fun refreshDailyBackupsList() {
         com.example.utils.BackupManager.refreshBackupStatus(getApplication())
         val list = com.example.utils.BackupManager.getDailyBackups(getApplication())
         _dailyBackupsList.value = list
         refreshDriveBackupsList()
+        refreshFirebaseState()
     }
 
     fun refreshDriveBackupsList() {
@@ -621,7 +950,6 @@ class DailyExpenseViewModel(application: Application) : AndroidViewModel(applica
     // 1. Independent Customer List Search State (Customer List page only)
     private val _customerSearchQuery = MutableStateFlow("")
     val customerSearchQuery: StateFlow<String> = _customerSearchQuery.asStateFlow()
-    val searchQuery: StateFlow<String> = _customerSearchQuery.asStateFlow() // Backwards compatibility
 
     @OptIn(kotlinx.coroutines.FlowPreview::class)
     private val debouncedCustomerSearch = _customerSearchQuery.debounce { q ->
@@ -640,9 +968,6 @@ class DailyExpenseViewModel(application: Application) : AndroidViewModel(applica
 
     private val _selectedFilter = MutableStateFlow(CustomerFilter.ALL)
     val selectedFilter: StateFlow<CustomerFilter> = _selectedFilter.asStateFlow()
-
-    private val _selectedCustomer = MutableStateFlow<CustomerEntity?>(null)
-    val selectedCustomer: StateFlow<CustomerEntity?> = _selectedCustomer.asStateFlow()
 
     val customersWithTransactions: StateFlow<List<CustomerWithTransactions>> =
         repository.customersWithTransactions.stateIn(
@@ -723,23 +1048,12 @@ class DailyExpenseViewModel(application: Application) : AndroidViewModel(applica
             }
         }
 
-        val cal = Calendar.getInstance()
-        val currentMonth = cal.get(Calendar.MONTH)
-        val currentYear = cal.get(Calendar.YEAR)
-        val currentDay = cal.get(Calendar.DAY_OF_YEAR)
-
-        var monthColl = 0.0
-        var todayColl = 0.0
-
-        // We can calculate from all transactions
         DashboardSummary(
             totalYouWillReceive = receive,
             totalYouNeedToPay = pay,
             totalExpenses = expenses,
             totalBalance = receive - pay,
-            totalCustomersCount = summaries.size,
-            thisMonthCollection = monthColl,
-            todayCollection = todayColl
+            totalCustomersCount = summaries.size
         )
     }.stateIn(
         scope = viewModelScope,
@@ -748,6 +1062,22 @@ class DailyExpenseViewModel(application: Application) : AndroidViewModel(applica
     )
 
     val allTransactions: StateFlow<List<TransactionEntity>> = repository.allTransactions.stateIn(
+        scope = viewModelScope,
+        started = SharingStarted.WhileSubscribed(5000),
+        initialValue = emptyList()
+    )
+
+    val recentTransactions: StateFlow<List<RecentTransactionEntry>> = combine(
+        allTransactions,
+        customerSummaries
+    ) { transactions, summaries ->
+        val customerMap = summaries.associate { it.customer.id to it.customer }
+        transactions.mapNotNull { tx ->
+            customerMap[tx.customerId]?.let { cust ->
+                RecentTransactionEntry(transaction = tx, customer = cust)
+            }
+        }.take(30)
+    }.stateIn(
         scope = viewModelScope,
         started = SharingStarted.WhileSubscribed(5000),
         initialValue = emptyList()
@@ -804,10 +1134,6 @@ class DailyExpenseViewModel(application: Application) : AndroidViewModel(applica
         _customerSearchQuery.value = ""
     }
 
-    fun setSearchQuery(query: String) {
-        setCustomerSearchQuery(query)
-    }
-
     fun setTransactionSearchQuery(query: String) {
         _transactionSearchQuery.value = query
     }
@@ -819,14 +1145,6 @@ class DailyExpenseViewModel(application: Application) : AndroidViewModel(applica
     fun setActiveCustomerDetailId(customerId: Long?) {
         _activeCustomerDetailId.value = customerId
         _transactionSearchQuery.value = "" // Always start with empty search when entering/re-entering
-    }
-
-    fun getCustomersPagedFlow(query: String = ""): Flow<PagingData<CustomerEntity>> {
-        return Pager(
-            config = PagingConfig(pageSize = 30, enablePlaceholders = false)
-        ) {
-            repository.getCustomersPaged(query)
-        }.flow.cachedIn(viewModelScope)
     }
 
     fun getTransactionsForCustomerPagedFlow(customerId: Long): Flow<PagingData<TransactionEntity>> {
@@ -841,13 +1159,348 @@ class DailyExpenseViewModel(application: Application) : AndroidViewModel(applica
         _selectedFilter.value = filter
     }
 
-    fun selectCustomer(customer: CustomerEntity?) {
-        _selectedCustomer.value = customer
-    }
-
     fun getTransactionsForCustomer(customerId: Long): Flow<List<TransactionEntity>> {
         return repository.getTransactionsForCustomer(customerId)
     }
+
+    fun getCustomerFlow(customerId: Long): Flow<CustomerEntity?> {
+        return repository.getCustomerById(customerId)
+    }
+
+    // ---- Summary Tab (SQLite half-open boundaries + Graph + Paging 3 Entries) ----
+    private val _summaryTopTab = MutableStateFlow(0)
+    private val _summaryGranularity = MutableStateFlow(SummaryGranularity.MONTHLY)
+    private val _summaryAnchor = MutableStateFlow(SummaryAnchor.today())
+    private val _summarySelectedBucketKey = MutableStateFlow<String?>(null)
+    private val _summaryDrillDownKey = MutableStateFlow<String?>(null)
+
+    fun setSummaryTopTab(tab: Int) {
+        _summaryTopTab.value = tab.coerceIn(0, 3)
+        when (tab) {
+            1 -> setSummaryGranularity(SummaryGranularity.DAILY)
+            2 -> setSummaryGranularity(SummaryGranularity.MONTHLY)
+            3 -> setSummaryGranularity(SummaryGranularity.YEARLY)
+        }
+    }
+
+    fun setSummaryGranularity(granularity: SummaryGranularity) {
+        _summaryGranularity.value = granularity
+        _summarySelectedBucketKey.value = null
+        _summaryDrillDownKey.value = null
+    }
+
+    fun setSummaryAnchor(anchor: SummaryAnchor) {
+        _summaryAnchor.value = SummaryPeriodHelper.clampToToday(anchor)
+        _summarySelectedBucketKey.value = null
+        _summaryDrillDownKey.value = null
+    }
+
+    fun stepSummaryPeriod(delta: Int) {
+        val current = _summaryAnchor.value
+        val next = SummaryPeriodHelper.stepAnchor(_summaryGranularity.value, current, delta)
+        _summaryAnchor.value = next
+        _summarySelectedBucketKey.value = null
+        _summaryDrillDownKey.value = null
+    }
+
+    fun resetSummaryToCurrent() {
+        _summaryAnchor.value = SummaryAnchor.today()
+        _summarySelectedBucketKey.value = null
+        _summaryDrillDownKey.value = null
+    }
+
+    fun selectSummaryChartBucket(bucketKey: String?) {
+        _summarySelectedBucketKey.value = if (_summarySelectedBucketKey.value == bucketKey) null else bucketKey
+    }
+
+    fun openChartBucketEntries(bucketKey: String) {
+        val range = SummaryPeriodHelper.parseBucketKeyToRange(bucketKey)
+        if (range != null) {
+            _summaryDrillDownKey.value = bucketKey
+        }
+    }
+
+    fun clearChartDrillDown() {
+        _summaryDrillDownKey.value = null
+    }
+
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    val summaryTopOverviewState: StateFlow<SummaryTopOverviewState> = combine(
+        _summaryTopTab,
+        _summaryAnchor
+    ) { tab, anchor ->
+        tab to anchor
+    }.flatMapLatest { (tab, anchor) ->
+        val effectiveAnchor = if (tab == 0) SummaryAnchor.today() else anchor
+        val dayRange = SummaryPeriodHelper.dayRange(effectiveAnchor.year, effectiveAnchor.monthZeroBased, effectiveAnchor.dayOfMonth)
+        val monthRange = SummaryPeriodHelper.monthRange(effectiveAnchor.year, effectiveAnchor.monthZeroBased)
+        val yearRange = SummaryPeriodHelper.yearRange(effectiveAnchor.year)
+        combine(
+            repository.observeSummaryPeriodTotals(dayRange.startMillis, dayRange.endMillis),
+            repository.observeSummaryPeriodTotals(monthRange.startMillis, monthRange.endMillis),
+            repository.observeSummaryPeriodTotals(yearRange.startMillis, yearRange.endMillis)
+        ) { d, m, y ->
+            SummaryTopOverviewState(
+                selectedTab = tab,
+                anchor = anchor,
+                dailyTotals = d,
+                monthlyTotals = m,
+                yearlyTotals = y
+            )
+        }
+    }.stateIn(
+        scope = viewModelScope,
+        started = SharingStarted.WhileSubscribed(5000),
+        initialValue = SummaryTopOverviewState()
+    )
+
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    val summaryChartState: StateFlow<SummaryChartUiState> = combine(
+        _summaryGranularity,
+        _summaryAnchor,
+        _summarySelectedBucketKey,
+        _summaryDrillDownKey
+    ) { granularity, anchor, selectedKey, drillKey ->
+        Quad(granularity, anchor, selectedKey, drillKey)
+    }.flatMapLatest { (granularity, anchor, selectedKey, drillKey) ->
+        val overviewRange = SummaryPeriodHelper.periodRange(granularity, anchor)
+        val chartRange = SummaryPeriodHelper.chartRange(granularity, anchor)
+        val bucketsFlow = when (granularity) {
+            SummaryGranularity.DAILY -> repository.observeDailyBuckets(chartRange.startMillis, chartRange.endMillis)
+            SummaryGranularity.MONTHLY -> repository.observeMonthlyBuckets(chartRange.startMillis, chartRange.endMillis)
+            SummaryGranularity.YEARLY -> repository.observeYearlyBuckets(chartRange.startMillis, chartRange.endMillis)
+        }
+        combine(
+            repository.observeSummaryPeriodTotals(overviewRange.startMillis, overviewRange.endMillis),
+            bucketsFlow
+        ) { overviewTotals, rawBuckets ->
+            buildSummaryChartUiState(
+                granularity = granularity,
+                anchor = anchor,
+                selectedBucketKey = selectedKey,
+                drillDownBucketKey = drillKey,
+                overviewTotals = overviewTotals,
+                rawBuckets = rawBuckets
+            )
+        }
+    }.stateIn(
+        scope = viewModelScope,
+        started = SharingStarted.WhileSubscribed(5000),
+        initialValue = SummaryChartUiState(
+            isLoading = true,
+            periodLabel = SummaryPeriodHelper.formatPeriodLabel(SummaryGranularity.MONTHLY, SummaryAnchor.today())
+        )
+    )
+
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    val summaryGroupSubtotalsMap: StateFlow<Map<String, SummaryChartBucketTuple>> = combine(
+        _summaryGranularity,
+        _summaryAnchor,
+        _summaryDrillDownKey
+    ) { granularity, anchor, drillKey ->
+        Triple(granularity, anchor, drillKey)
+    }.flatMapLatest { (granularity, anchor, drillKey) ->
+        val range = drillKey?.let { SummaryPeriodHelper.parseBucketKeyToRange(it) }
+            ?: SummaryPeriodHelper.periodRange(granularity, anchor)
+        val effectiveGranularity = when {
+            drillKey == null -> granularity
+            drillKey.count { it == '-' } == 2 -> SummaryGranularity.DAILY
+            drillKey.count { it == '-' } == 1 -> SummaryGranularity.MONTHLY
+            else -> SummaryGranularity.YEARLY
+        }
+        when (effectiveGranularity) {
+            SummaryGranularity.DAILY -> flowOf(emptyMap())
+            SummaryGranularity.MONTHLY -> repository.observeDailyBuckets(range.startMillis, range.endMillis)
+                .map { list -> list.associateBy { it.bucketKey } }
+            SummaryGranularity.YEARLY -> repository.observeMonthlyBuckets(range.startMillis, range.endMillis)
+                .map { list -> list.associateBy { it.bucketKey } }
+        }
+    }.stateIn(
+        scope = viewModelScope,
+        started = SharingStarted.WhileSubscribed(5000),
+        initialValue = emptyMap()
+    )
+
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    val summaryEntriesPagedFlow: Flow<PagingData<SummaryEntryListItem>> = combine(
+        _summaryGranularity,
+        _summaryAnchor,
+        _summaryDrillDownKey
+    ) { granularity, anchor, drillKey ->
+        Triple(granularity, anchor, drillKey)
+    }.flatMapLatest { (granularity, anchor, drillKey) ->
+        val range = drillKey?.let { SummaryPeriodHelper.parseBucketKeyToRange(it) }
+            ?: SummaryPeriodHelper.periodRange(granularity, anchor)
+        val effectiveGranularity = when {
+            drillKey == null -> granularity
+            drillKey.count { it == '-' } == 2 -> SummaryGranularity.DAILY
+            drillKey.count { it == '-' } == 1 -> SummaryGranularity.MONTHLY
+            else -> SummaryGranularity.YEARLY
+        }
+        Pager(
+            config = PagingConfig(pageSize = 30, enablePlaceholders = false)
+        ) {
+            repository.getSummaryTransactionsPaged(range.startMillis, range.endMillis)
+        }.flow.map { pagingData ->
+            val rows = pagingData.map { tuple -> SummaryEntryListItem.EntryRow(tuple) }
+            when (effectiveGranularity) {
+                SummaryGranularity.DAILY -> rows.map { it as SummaryEntryListItem }
+                SummaryGranularity.MONTHLY -> rows.insertSeparators { before: SummaryEntryListItem.EntryRow?, after: SummaryEntryListItem.EntryRow? ->
+                    if (after == null) return@insertSeparators null
+                    val afterDay = SummaryPeriodHelper.localDayKeyFromMillis(after.tuple.dateTimestamp)
+                    val beforeDay = before?.let { SummaryPeriodHelper.localDayKeyFromMillis(it.tuple.dateTimestamp) }
+                    if (beforeDay != afterDay) {
+                        SummaryEntryListItem.GroupHeader(
+                            groupKey = afterDay,
+                            title = SummaryPeriodHelper.formatDayHeaderLabel(afterDay),
+                            granularity = SummaryGranularity.MONTHLY
+                        )
+                    } else null
+                }
+                SummaryGranularity.YEARLY -> rows.insertSeparators { before: SummaryEntryListItem.EntryRow?, after: SummaryEntryListItem.EntryRow? ->
+                    if (after == null) return@insertSeparators null
+                    val afterMonth = SummaryPeriodHelper.localMonthKeyFromMillis(after.tuple.dateTimestamp)
+                    val beforeMonth = before?.let { SummaryPeriodHelper.localMonthKeyFromMillis(it.tuple.dateTimestamp) }
+                    if (beforeMonth != afterMonth) {
+                        SummaryEntryListItem.GroupHeader(
+                            groupKey = afterMonth,
+                            title = SummaryPeriodHelper.formatMonthHeaderLabel(afterMonth),
+                            granularity = SummaryGranularity.YEARLY
+                        )
+                    } else null
+                }
+            }
+        }
+    }.cachedIn(viewModelScope)
+
+    private fun buildSummaryChartUiState(
+        granularity: SummaryGranularity,
+        anchor: SummaryAnchor,
+        selectedBucketKey: String?,
+        drillDownBucketKey: String?,
+        overviewTotals: SummaryPeriodTotalsTuple,
+        rawBuckets: List<SummaryChartBucketTuple>
+    ): SummaryChartUiState {
+        val bucketByKey = rawBuckets.associateBy { it.bucketKey }
+        val today = SummaryAnchor.today()
+        val monthShortNames = arrayOf("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+
+        val basePoints: List<SummaryChartPoint> = when (granularity) {
+            SummaryGranularity.DAILY -> {
+                val daysCount = SummaryPeriodHelper.daysInMonth(anchor.year, anchor.monthZeroBased)
+                val selectedDayKey = SummaryPeriodHelper.dayBucketKey(anchor.year, anchor.monthZeroBased, anchor.dayOfMonth)
+                var runningCum = 0.0
+                (1..daysCount).map { day ->
+                    val key = SummaryPeriodHelper.dayBucketKey(anchor.year, anchor.monthZeroBased, day)
+                    val b = bucketByKey[key]
+                    val paid = b?.totalPaid ?: 0.0
+                    val rec = b?.totalReceived ?: 0.0
+                    val net = rec - paid
+                    runningCum += net
+                    SummaryChartPoint(
+                        bucketKey = key,
+                        xLabel = day.toString(),
+                        fullLabel = SummaryPeriodHelper.formatDayHeaderLabel(key),
+                        totalPaid = paid,
+                        totalReceived = rec,
+                        netChange = net,
+                        cumulativeBalance = runningCum,
+                        entryCount = b?.entryCount ?: 0,
+                        isCurrentOrSelected = (key == selectedDayKey)
+                    )
+                }
+            }
+            SummaryGranularity.MONTHLY -> {
+                val activeMonthKey = SummaryPeriodHelper.monthBucketKey(anchor.year, anchor.monthZeroBased)
+                var runningCum = 0.0
+                (0..11).map { m ->
+                    val key = SummaryPeriodHelper.monthBucketKey(anchor.year, m)
+                    val b = bucketByKey[key]
+                    val paid = b?.totalPaid ?: 0.0
+                    val rec = b?.totalReceived ?: 0.0
+                    val net = rec - paid
+                    runningCum += net
+                    SummaryChartPoint(
+                        bucketKey = key,
+                        xLabel = monthShortNames[m],
+                        fullLabel = "${monthShortNames[m]} ${anchor.year}",
+                        totalPaid = paid,
+                        totalReceived = rec,
+                        netChange = net,
+                        cumulativeBalance = runningCum,
+                        entryCount = b?.entryCount ?: 0,
+                        isCurrentOrSelected = (key == activeMonthKey)
+                    )
+                }
+            }
+            SummaryGranularity.YEARLY -> {
+                val activeYearKey = anchor.year.toString()
+                val sorted = if (rawBuckets.isEmpty()) {
+                    emptyList()
+                } else {
+                    rawBuckets.sortedBy { it.bucketKey }
+                }
+                var runningCum = 0.0
+                sorted.map { b ->
+                    val net = b.totalReceived - b.totalPaid
+                    runningCum += net
+                    SummaryChartPoint(
+                        bucketKey = b.bucketKey,
+                        xLabel = b.bucketKey,
+                        fullLabel = b.bucketKey,
+                        totalPaid = b.totalPaid,
+                        totalReceived = b.totalReceived,
+                        netChange = net,
+                        cumulativeBalance = runningCum,
+                        entryCount = b.entryCount,
+                        isCurrentOrSelected = (b.bucketKey == activeYearKey)
+                    )
+                }
+            }
+        }
+
+        val activePointsWithVolume = basePoints.filter { it.entryCount > 0 || it.totalPaid > 0.0 || it.totalReceived > 0.0 }
+        val highestPoint = activePointsWithVolume.maxByOrNull { it.totalPaid + it.totalReceived }
+        val lowestPoint = activePointsWithVolume.minByOrNull { it.totalPaid + it.totalReceived }
+
+        val decoratedPoints = basePoints.map { pt ->
+            pt.copy(
+                isHighest = highestPoint != null && pt.bucketKey == highestPoint.bucketKey,
+                isLowest = lowestPoint != null && pt.bucketKey == lowestPoint.bucketKey && highestPoint?.bucketKey != lowestPoint.bucketKey
+            )
+        }
+
+        val drillDownLabel = drillDownBucketKey?.let { key ->
+            when (key.count { it == '-' }) {
+                2 -> SummaryPeriodHelper.formatDayHeaderLabel(key)
+                1 -> SummaryPeriodHelper.formatMonthHeaderLabel(key)
+                else -> key
+            }
+        }
+
+        return SummaryChartUiState(
+            isLoading = false,
+            granularity = granularity,
+            anchor = anchor,
+            periodLabel = SummaryPeriodHelper.formatPeriodLabel(granularity, anchor),
+            canStepForward = SummaryPeriodHelper.canStepForward(granularity, anchor, today),
+            overview = SummaryPeriodOverview(
+                totalPaid = overviewTotals.totalPaid,
+                totalReceived = overviewTotals.totalReceived,
+                netBalance = overviewTotals.totalReceived - overviewTotals.totalPaid,
+                entryCount = overviewTotals.entryCount,
+                customerCount = overviewTotals.customerCount,
+                highestLabel = highestPoint?.fullLabel,
+                highestAmount = highestPoint?.let { it.totalPaid + it.totalReceived } ?: 0.0
+            ),
+            points = decoratedPoints,
+            selectedBucketKey = selectedBucketKey ?: decoratedPoints.firstOrNull { it.isCurrentOrSelected && it.entryCount > 0 }?.bucketKey,
+            drillDownBucketKey = drillDownBucketKey,
+            drillDownLabel = drillDownLabel
+        )
+    }
+
+    private data class Quad<A, B, C, D>(val first: A, val second: B, val third: C, val fourth: D)
 
     // Customer Actions
     fun addCustomer(
@@ -858,44 +1511,88 @@ class DailyExpenseViewModel(application: Application) : AndroidViewModel(applica
         notes: String = "",
         collectToday: Boolean = false,
         collectDueDate: Long? = null,
-        profilePhotoUri: String? = null
+        profilePhotoUri: String? = null,
+        onSuccess: () -> Unit = {},
+        onError: (Throwable) -> Unit = {}
     ) {
         viewModelScope.launch {
-            repository.insertCustomer(
-                CustomerEntity(
-                    name = name.trim(),
-                    mobileNumber = mobileNumber.trim(),
-                    address = address.trim(),
-                    email = email.trim(),
-                    notes = notes.trim(),
-                    collectToday = collectToday,
-                    collectDueDate = collectDueDate,
-                    profilePhotoUri = profilePhotoUri,
-                    createdTimestamp = System.currentTimeMillis(),
-                    lastUpdatedTimestamp = System.currentTimeMillis()
-                )
-            )
-        }
-    }
-
-    fun updateCustomer(customer: CustomerEntity) {
-        viewModelScope.launch {
-            repository.updateCustomer(customer.copy(lastUpdatedTimestamp = System.currentTimeMillis()))
-        }
-    }
-
-    fun deleteCustomer(customer: CustomerEntity) {
-        viewModelScope.launch {
-            repository.deleteCustomer(customer)
-            if (_selectedCustomer.value?.id == customer.id) {
-                _selectedCustomer.value = null
+            try {
+                withContext(Dispatchers.IO) {
+                    repository.insertCustomer(
+                        CustomerEntity(
+                            name = name.trim(),
+                            mobileNumber = mobileNumber.trim(),
+                            address = address.trim(),
+                            email = email.trim(),
+                            notes = notes.trim(),
+                            collectToday = collectToday,
+                            collectDueDate = collectDueDate,
+                            profilePhotoUri = profilePhotoUri,
+                            createdTimestamp = System.currentTimeMillis(),
+                            lastUpdatedTimestamp = System.currentTimeMillis()
+                        )
+                    )
+                }
+                onSuccess()
+            } catch (e: Exception) {
+                onError(e)
             }
         }
     }
 
-    fun toggleCollectToday(customer: CustomerEntity) {
+    fun updateCustomer(
+        customer: CustomerEntity,
+        onSuccess: () -> Unit = {},
+        onError: (Throwable) -> Unit = {}
+    ) {
         viewModelScope.launch {
-            repository.updateCustomer(customer.copy(collectToday = !customer.collectToday))
+            try {
+                withContext(Dispatchers.IO) {
+                    repository.updateCustomer(customer.copy(lastUpdatedTimestamp = System.currentTimeMillis()))
+                }
+                onSuccess()
+            } catch (e: Exception) {
+                onError(e)
+            }
+        }
+    }
+
+    fun deleteCustomer(
+        customer: CustomerEntity,
+        onSuccess: () -> Unit = {},
+        onError: (Throwable) -> Unit = {}
+    ) {
+        viewModelScope.launch {
+            try {
+                withContext(Dispatchers.IO) {
+                    repository.deleteCustomer(customer)
+                }
+                onSuccess()
+            } catch (e: Exception) {
+                onError(e)
+            }
+        }
+    }
+
+    fun toggleCollectToday(
+        customer: CustomerEntity,
+        onSuccess: () -> Unit = {},
+        onError: (Throwable) -> Unit = {}
+    ) {
+        viewModelScope.launch {
+            try {
+                withContext(Dispatchers.IO) {
+                    repository.updateCustomer(
+                        customer.copy(
+                            collectToday = !customer.collectToday,
+                            lastUpdatedTimestamp = System.currentTimeMillis()
+                        )
+                    )
+                }
+                onSuccess()
+            } catch (e: Exception) {
+                onError(e)
+            }
         }
     }
 
@@ -908,33 +1605,88 @@ class DailyExpenseViewModel(application: Application) : AndroidViewModel(applica
         category: String,
         paymentMode: String,
         dateTimestamp: Long = System.currentTimeMillis(),
-        attachmentPath: String? = null
+        attachmentPath: String? = null,
+        onSuccess: () -> Unit = {},
+        onError: (Throwable) -> Unit = {}
     ) {
         viewModelScope.launch {
-            repository.insertTransaction(
-                TransactionEntity(
-                    customerId = customerId,
-                    transactionType = transactionType,
-                    amount = amount,
-                    comment = comment.trim(),
-                    category = category,
-                    paymentMode = paymentMode,
-                    dateTimestamp = dateTimestamp,
-                    attachmentPath = attachmentPath
-                )
-            )
+            try {
+                withContext(Dispatchers.IO) {
+                    repository.insertTransaction(
+                        TransactionEntity(
+                            customerId = customerId,
+                            transactionType = transactionType,
+                            amount = amount,
+                            comment = comment.trim(),
+                            category = category,
+                            paymentMode = paymentMode,
+                            dateTimestamp = dateTimestamp,
+                            attachmentPath = attachmentPath
+                        )
+                    )
+                }
+                onSuccess()
+            } catch (e: Exception) {
+                onError(e)
+            }
         }
     }
 
-    fun updateTransaction(transaction: TransactionEntity) {
+    fun updateTransaction(
+        transaction: TransactionEntity,
+        onSuccess: () -> Unit = {},
+        onError: (Throwable) -> Unit = {}
+    ) {
         viewModelScope.launch {
-            repository.updateTransaction(transaction)
+            try {
+                withContext(Dispatchers.IO) {
+                    repository.updateTransaction(transaction)
+                }
+                onSuccess()
+            } catch (e: Exception) {
+                onError(e)
+            }
         }
     }
 
-    fun deleteTransaction(transaction: TransactionEntity) {
+    fun deleteTransaction(
+        transaction: TransactionEntity,
+        onSuccess: () -> Unit = {},
+        onError: (Throwable) -> Unit = {}
+    ) {
         viewModelScope.launch {
-            repository.deleteTransaction(transaction)
+            try {
+                withContext(Dispatchers.IO) {
+                    repository.deleteTransaction(transaction)
+                }
+                onSuccess()
+            } catch (e: Exception) {
+                onError(e)
+            }
+        }
+    }
+
+    fun removeTransactionImage(
+        transaction: TransactionEntity,
+        imagePathToRemove: String,
+        onSuccess: () -> Unit = {},
+        onError: (Throwable) -> Unit = {}
+    ) {
+        viewModelScope.launch {
+            try {
+                withContext(Dispatchers.IO) {
+                    val remaining = transaction.attachmentPath
+                        .orEmpty()
+                        .split("|")
+                        .map { it.trim() }
+                        .filter { it.isNotBlank() && it != imagePathToRemove.trim() }
+                    val updatedPath = if (remaining.isNotEmpty()) remaining.joinToString("|") else null
+                    repository.updateTransaction(transaction.copy(attachmentPath = updatedPath))
+                }
+                onSuccess()
+            } catch (e: Exception) {
+                onError(e)
+            }
         }
     }
 
@@ -945,34 +1697,65 @@ class DailyExpenseViewModel(application: Application) : AndroidViewModel(applica
         category: String,
         amount: Double,
         notes: String = "",
-        attachmentPath: String? = null
+        attachmentPath: String? = null,
+        onSuccess: () -> Unit = {},
+        onError: (Throwable) -> Unit = {}
     ) {
         viewModelScope.launch {
-            repository.insertExpense(
-                MonthlyExpenseEntity(
-                    monthYear = monthYear,
-                    title = title.trim(),
-                    category = category,
-                    amount = amount,
-                    notes = notes.trim(),
-                    attachmentPath = attachmentPath
-                )
-            )
-            syncMonthlyExpensesToLedger()
+            try {
+                withContext(Dispatchers.IO) {
+                    repository.insertExpense(
+                        MonthlyExpenseEntity(
+                            monthYear = monthYear,
+                            title = title.trim(),
+                            category = category,
+                            amount = amount,
+                            notes = notes.trim(),
+                            attachmentPath = attachmentPath
+                        )
+                    )
+                }
+                syncMonthlyExpensesToLedger()
+                onSuccess()
+            } catch (e: Exception) {
+                onError(e)
+            }
         }
     }
 
-    fun updateExpense(expense: MonthlyExpenseEntity) {
+    fun updateExpense(
+        expense: MonthlyExpenseEntity,
+        onSuccess: () -> Unit = {},
+        onError: (Throwable) -> Unit = {}
+    ) {
         viewModelScope.launch {
-            repository.updateExpense(expense)
-            syncMonthlyExpensesToLedger()
+            try {
+                withContext(Dispatchers.IO) {
+                    repository.updateExpense(expense)
+                }
+                syncMonthlyExpensesToLedger()
+                onSuccess()
+            } catch (e: Exception) {
+                onError(e)
+            }
         }
     }
 
-    fun deleteExpense(expense: MonthlyExpenseEntity) {
+    fun deleteExpense(
+        expense: MonthlyExpenseEntity,
+        onSuccess: () -> Unit = {},
+        onError: (Throwable) -> Unit = {}
+    ) {
         viewModelScope.launch {
-            repository.deleteExpense(expense)
-            syncMonthlyExpensesToLedger()
+            try {
+                withContext(Dispatchers.IO) {
+                    repository.deleteExpense(expense)
+                }
+                syncMonthlyExpensesToLedger()
+                onSuccess()
+            } catch (e: Exception) {
+                onError(e)
+            }
         }
     }
 
@@ -1175,85 +1958,7 @@ class DailyExpenseViewModel(application: Application) : AndroidViewModel(applica
     }
 
     suspend fun exportAllDataJson(): String {
-        val customers = repository.allCustomers.firstOrNull() ?: emptyList()
-        val transactions = repository.allTransactions.firstOrNull() ?: emptyList()
-        val expenses = repository.allExpenses.firstOrNull() ?: emptyList()
-
-        val rootObj = org.json.JSONObject()
-        val custArray = org.json.JSONArray()
-        val txArray = org.json.JSONArray()
-        val expArray = org.json.JSONArray()
-        val context = getApplication<android.app.Application>()
-
-        customers.forEach { c ->
-            val obj = org.json.JSONObject().apply {
-                put("id", c.id)
-                put("name", c.name)
-                put("mobileNumber", c.mobileNumber)
-                put("address", c.address)
-                put("email", c.email)
-                put("notes", c.notes)
-                put("profilePhotoUri", c.profilePhotoUri ?: "")
-                put("collectToday", c.collectToday)
-                put("collectDueDate", c.collectDueDate ?: 0L)
-                put("lastUpdatedTimestamp", c.lastUpdatedTimestamp)
-
-                val photoArray = imageStringToJsonArray(context, c.profilePhotoUri)
-                if (photoArray.length() > 0) {
-                    put("profilePhotoBase64List", photoArray)
-                    put("profilePhotoBase64", photoArray.optString(0, ""))
-                }
-            }
-            custArray.put(obj)
-        }
-
-        transactions.forEach { t ->
-            val obj = org.json.JSONObject().apply {
-                put("id", t.id)
-                put("customerId", t.customerId)
-                put("transactionType", t.transactionType)
-                put("amount", t.amount)
-                put("dateTimestamp", t.dateTimestamp)
-                put("comment", t.comment)
-                put("category", t.category)
-                put("paymentMode", t.paymentMode)
-                put("attachmentPath", t.attachmentPath ?: "")
-
-                val attachArray = imageStringToJsonArray(context, t.attachmentPath)
-                if (attachArray.length() > 0) {
-                    put("attachmentBase64List", attachArray)
-                    put("attachmentBase64", attachArray.optString(0, ""))
-                }
-            }
-            txArray.put(obj)
-        }
-
-        expenses.forEach { exp ->
-            val obj = org.json.JSONObject().apply {
-                put("id", exp.id)
-                put("monthYear", exp.monthYear)
-                put("title", exp.title)
-                put("category", exp.category)
-                put("amount", exp.amount)
-                put("dateTimestamp", exp.dateTimestamp)
-                put("notes", exp.notes)
-                put("attachmentPath", exp.attachmentPath ?: "")
-
-                val attachArray = imageStringToJsonArray(context, exp.attachmentPath)
-                if (attachArray.length() > 0) {
-                    put("attachmentBase64List", attachArray)
-                    put("attachmentBase64", attachArray.optString(0, ""))
-                }
-            }
-            expArray.put(obj)
-        }
-
-        rootObj.put("version", 2)
-        rootObj.put("customers", custArray)
-        rootObj.put("transactions", txArray)
-        rootObj.put("monthlyExpenses", expArray)
-
-        return rootObj.toString(2)
+        return com.example.utils.BackupManager.exportDatabaseToJson(getApplication())
     }
 
     fun importAllDataJsonAsync(jsonString: String, onResult: (Boolean) -> Unit) {
@@ -1263,26 +1968,67 @@ class DailyExpenseViewModel(application: Application) : AndroidViewModel(applica
         }
     }
 
-    suspend fun importAllDataJson(jsonString: String): Boolean = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+    fun restoreFullBackupFromJson(
+        jsonString: String,
+        authViewModel: AuthViewModel?,
+        onComplete: (FullBackupRestoreSummary) -> Unit
+    ) {
+        viewModelScope.launch {
+            val summary = performFullBackupImportInternal(jsonString, authViewModel)
+            onComplete(summary)
+        }
+    }
+
+    fun resolvePendingProfileRestore(replace: Boolean, authViewModel: AuthViewModel) {
+        val pending = _pendingProfileRestore.value ?: return
+        _pendingProfileRestore.value = null
+        if (!replace) return
+
+        val ctx = getApplication<Application>()
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            val savedAvatarPath = if (!pending.profileImageBase64.isNullOrBlank()) {
+                com.example.utils.ImageUtils.saveProfileAvatar(ctx, pending.profileImageBase64)
+            } else null
+
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                authViewModel.applyRestoredProfile(
+                    name = pending.name,
+                    businessName = pending.businessName,
+                    phone = pending.phone,
+                    email = pending.email,
+                    profileImagePath = savedAvatarPath
+                )
+            }
+        }
+    }
+
+    suspend fun importAllDataJson(jsonString: String): Boolean {
+        return performFullBackupImportInternal(jsonString, authViewModel = null).success
+    }
+
+    internal suspend fun performFullBackupImportInternal(
+        jsonString: String,
+        authViewModel: AuthViewModel?
+    ): FullBackupRestoreSummary = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
         return@withContext try {
             val rootObj = org.json.JSONObject(jsonString)
-            val custArray = rootObj.getJSONArray("customers")
-            val txArray = rootObj.getJSONArray("transactions")
+            val custArray = rootObj.optJSONArray("customers") ?: org.json.JSONArray()
+            val txArray = rootObj.optJSONArray("transactions") ?: org.json.JSONArray()
             val context = getApplication<android.app.Application>()
 
             val idMap = mutableMapOf<Long, Long>()
 
-            // Fetch current existing customers & transactions in bulk to prevent creating duplicates or doing thousands of DB queries
+            // Fetch current existing customers & transactions in bulk
             val existingCustomers = repository.allCustomers.firstOrNull() ?: emptyList()
             val existingTxs = repository.allTransactions.firstOrNull() ?: emptyList()
 
-            // Pre-build set of existing transactions for O(1) duplicate checks
             val existingTxKeySet = mutableSetOf<String>()
             existingTxs.forEach { tx ->
                 val key = "${tx.customerId}_${tx.transactionType}_${(tx.amount * 100).toLong()}_${tx.comment.trim()}"
                 existingTxKeySet.add(key)
             }
 
+            var customersAdded = 0
             for (i in 0 until custArray.length()) {
                 val obj = custArray.getJSONObject(i)
                 val oldId = obj.optLong("id", 0L)
@@ -1299,10 +2045,9 @@ class DailyExpenseViewModel(application: Application) : AndroidViewModel(applica
                     }
                 }
 
-                // Check if customer already exists in DB (matching by name case-insensitive OR mobile number)
                 val matchingCustomer = existingCustomers.find { existing ->
                     existing.name.trim().equals(nameVal, ignoreCase = true) ||
-                    (mobileVal.isNotBlank() && existing.mobileNumber.trim() == mobileVal)
+                        (mobileVal.isNotBlank() && existing.mobileNumber.trim() == mobileVal)
                 }
 
                 val targetCustId = if (matchingCustomer != null) {
@@ -1311,6 +2056,7 @@ class DailyExpenseViewModel(application: Application) : AndroidViewModel(applica
                     }
                     matchingCustomer.id
                 } else {
+                    customersAdded++
                     repository.insertCustomer(
                         CustomerEntity(
                             name = nameVal,
@@ -1357,7 +2103,7 @@ class DailyExpenseViewModel(application: Application) : AndroidViewModel(applica
                 val txKey = "${targetCustId}_${txType}_${(txAmount * 100).toLong()}_${txComment}"
 
                 if (!existingTxKeySet.contains(txKey)) {
-                    existingTxKeySet.add(txKey) // Mark as added in batch to avoid duplicate within JSON itself
+                    existingTxKeySet.add(txKey)
                     newTransactionsToInsert.add(
                         TransactionEntity(
                             customerId = targetCustId,
@@ -1373,12 +2119,12 @@ class DailyExpenseViewModel(application: Application) : AndroidViewModel(applica
                 }
             }
 
-            // Insert transactions in chunks of 200 for optimal performance
             newTransactionsToInsert.chunked(200).forEach { chunk ->
                 repository.insertTransactionsBatch(chunk)
             }
 
             // Restore Monthly Expenses if present in JSON
+            var expensesAdded = 0
             if (rootObj.has("monthlyExpenses")) {
                 val expArray = rootObj.getJSONArray("monthlyExpenses")
                 val existingExpenses = repository.allExpenses.firstOrNull() ?: emptyList()
@@ -1404,6 +2150,7 @@ class DailyExpenseViewModel(application: Application) : AndroidViewModel(applica
 
                     val key = "${monthYear}_${title}_${(amount * 100).toLong()}"
                     if (title.isNotBlank() && amount > 0.0 && !existingExpKeySet.contains(key)) {
+                        expensesAdded++
                         repository.insertExpense(
                             MonthlyExpenseEntity(
                                 monthYear = monthYear,
@@ -1419,10 +2166,60 @@ class DailyExpenseViewModel(application: Application) : AndroidViewModel(applica
                 }
             }
 
-            true
+            // Handle optional userProfile restoration (conflict-aware; legacy backups without userProfile leave current profile untouched)
+            var hasProfile = false
+            val profileObj = rootObj.optJSONObject("userProfile")
+            if (profileObj != null) {
+                hasProfile = true
+                val bName = profileObj.optString("name", "")
+                val bBusiness = profileObj.optString("businessName", "")
+                val bPhone = profileObj.optString("phone", "")
+                val bEmail = profileObj.optString("email", "")
+                val bImgBase64 = profileObj.optString("profileImageBase64", "").ifBlank { null }
+
+                if (authViewModel != null) {
+                    val current = authViewModel.userProfile.value
+                    val differs = current.name != bName ||
+                        current.businessName != bBusiness ||
+                        current.phone != bPhone ||
+                        current.email != bEmail ||
+                        (bImgBase64 != null && current.profileImageUri == null)
+
+                    if (authViewModel.hasExistingCustomProfile() && differs) {
+                        _pendingProfileRestore.value = PendingProfileRestore(
+                            name = bName,
+                            businessName = bBusiness,
+                            phone = bPhone,
+                            email = bEmail,
+                            profileImageBase64 = bImgBase64
+                        )
+                    } else {
+                        val savedAvatarPath = if (!bImgBase64.isNullOrBlank()) {
+                            com.example.utils.ImageUtils.saveProfileAvatar(context, bImgBase64)
+                        } else null
+                        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                            authViewModel.applyRestoredProfile(
+                                name = bName,
+                                businessName = bBusiness,
+                                phone = bPhone,
+                                email = bEmail,
+                                profileImagePath = savedAvatarPath
+                            )
+                        }
+                    }
+                }
+            }
+
+            FullBackupRestoreSummary(
+                success = true,
+                customersAdded = customersAdded,
+                transactionsAdded = newTransactionsToInsert.size,
+                expensesAdded = expensesAdded,
+                hasProfileInBackup = hasProfile
+            )
         } catch (e: Exception) {
             e.printStackTrace()
-            false
+            FullBackupRestoreSummary(success = false, errorMessage = e.localizedMessage ?: "Invalid backup JSON")
         }
     }
 }

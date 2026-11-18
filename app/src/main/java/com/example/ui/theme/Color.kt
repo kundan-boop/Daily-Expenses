@@ -57,10 +57,11 @@ val Slate100 = Color(0xFFF1F5F9)
 val Slate50 = Color(0xFFF8FAFC)
 val PrimaryNavy = Color(0xFF0F172A)
 
-val DarkBackground = Color(0xFF0F172A)
-val DarkSurface = Color(0xFF1E293B)
+val DarkBackground = Color(0xFF0B1120)
+val DarkSurface = Color(0xFF161E2E)
+val DarkSurfaceElevated = Color(0xFF1F293B)
 val DarkPrimary = Color(0xFF22C55E)
-
-
-
-
+val DarkTextPrimary = Color(0xFFF1F5F9)
+val DarkTextSecondary = Color(0xFFCBD5E1)
+val DarkTextMuted = Color(0xFF94A3B8)
+val DarkBorder = Color(0xFF2A3649)

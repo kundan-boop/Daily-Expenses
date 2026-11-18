@@ -16,6 +16,7 @@ import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.nestedscroll.nestedScroll
@@ -30,16 +31,12 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.paging.compose.collectAsLazyPagingItems
-import androidx.paging.compose.itemKey
 import com.example.data.CustomerEntity
 import com.example.ui.CustomerBalanceSummary
 import com.example.ui.CustomerFilter
 import com.example.ui.DailyExpenseViewModel
 import com.example.ui.theme.*
-import com.example.ui.theme.Slate500
-import com.example.ui.theme.Slate700
-import com.example.ui.theme.Slate900
+import com.example.utils.LocalAppStrings
 import java.text.SimpleDateFormat
 import java.util.*
 
@@ -51,29 +48,36 @@ fun DashboardScreen(
     onCustomerClick: (CustomerEntity) -> Unit,
     onAddCustomerClick: () -> Unit,
     onEditCustomerClick: (CustomerEntity) -> Unit = {},
-    onOpenSettings: () -> Unit = {}
+    onOpenSettings: () -> Unit = {},
+    onOpenGoogleDriveSettings: () -> Unit = onOpenSettings,
+    onOpenFirebaseSettings: () -> Unit = onOpenSettings,
+    onOpenMenu: (() -> Unit)? = null
 ) {
-    val dashboardSummary by viewModel.dashboardSummary.collectAsState()
-    val filteredSummaries by viewModel.filteredCustomerSummaries.collectAsState()
-    val searchQuery by viewModel.customerSearchQuery.collectAsState()
-    val backupStatus by viewModel.backupStatus.collectAsState()
-    val pagedCustomersFlow = remember(searchQuery) { viewModel.getCustomersPagedFlow(searchQuery) }
-    val pagedCustomers = pagedCustomersFlow.collectAsLazyPagingItems()
-    val userProfile by authViewModel?.userProfile?.collectAsState() ?: remember { mutableStateOf(null) }
+    val c = LedgerTheme.colors
+    val s = LocalAppStrings.current
+    val dashboardSummary by viewModel.dashboardSummary.collectAsStateWithLifecycle()
+    val filteredSummaries by viewModel.filteredCustomerSummaries.collectAsStateWithLifecycle()
+    val searchQuery by viewModel.customerSearchQuery.collectAsStateWithLifecycle()
+    val backupStatus by viewModel.backupStatus.collectAsStateWithLifecycle()
+    val firebaseBackupStatus by viewModel.firebaseBackupStatus.collectAsStateWithLifecycle()
+    val userProfile by authViewModel?.userProfile?.collectAsStateWithLifecycle() ?: remember { mutableStateOf(null) }
 
+    val view = androidx.compose.ui.platform.LocalView.current
     val isImeVisible = WindowInsets.isImeVisible
     val keyboardController = LocalSoftwareKeyboardController.current
     val focusManager = LocalFocusManager.current
 
-    // 1. If keyboard is open: first Back closes only the keyboard & clears focus
-    BackHandler(enabled = isImeVisible) {
-        keyboardController?.hide()
-        focusManager.clearFocus()
-    }
-
-    // 2. If keyboard is closed and customer search has text: next Back clears search
-    BackHandler(enabled = !isImeVisible && searchQuery.isNotEmpty()) {
-        viewModel.clearCustomerSearchQuery()
+    // Single deterministic BackHandler when IME is visible or search has text
+    BackHandler(enabled = isImeVisible || searchQuery.isNotEmpty()) {
+        val liveIme = isImeVisible ||
+            (androidx.core.view.ViewCompat.getRootWindowInsets(view)?.isVisible(androidx.core.view.WindowInsetsCompat.Type.ime()) == true)
+        if (liveIme) {
+            keyboardController?.hide()
+            focusManager.clearFocus()
+        } else if (searchQuery.isNotEmpty()) {
+            viewModel.clearCustomerSearchQuery()
+            focusManager.clearFocus()
+        }
     }
 
     // Clear search when leaving Dashboard page so searches never carry over
@@ -126,12 +130,13 @@ fun DashboardScreen(
 
     Scaffold(
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
+        containerColor = c.background,
         floatingActionButton = {
             ExtendedFloatingActionButton(
                 onClick = onAddCustomerClick,
-                icon = { Icon(Icons.Default.Add, contentDescription = "Add Customer") },
-                text = { Text("ADD CUSTOMER", fontWeight = FontWeight.Bold, letterSpacing = 1.sp) },
-                containerColor = GreenPrimary,
+                icon = { Icon(Icons.Default.Add, contentDescription = s.addCustomer) },
+                text = { Text(s.addCustomer.uppercase(), fontWeight = FontWeight.Bold, letterSpacing = 1.sp) },
+                containerColor = c.greenPrimary,
                 contentColor = Color.White,
                 shape = RoundedCornerShape(16.dp),
                 modifier = Modifier
@@ -139,25 +144,42 @@ fun DashboardScreen(
                     .testTag("add_customer_fab")
             )
         }
-    ) { innerPadding ->
+    ) { _ ->
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .background(Color.White)
+                .background(c.background)
         ) {
             // Editorial Header Bar - Clickable D or title goes to Settings
             Surface(
-                color = GreenPrimary,
+                color = c.brandHeader,
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
                         .statusBarsPadding()
-                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                        .padding(start = if (onOpenMenu != null) 4.dp else 16.dp, end = 16.dp, top = 12.dp, bottom = 12.dp),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
+                    if (onOpenMenu != null) {
+                        IconButton(
+                            onClick = onOpenMenu,
+                            modifier = Modifier
+                                .size(48.dp)
+                                .testTag("customer_ledger_menu_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Menu,
+                                contentDescription = "Open Menu",
+                                tint = Color.White,
+                                modifier = Modifier.size(26.dp)
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(2.dp))
+                    }
+
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -171,7 +193,7 @@ fun DashboardScreen(
                             modifier = Modifier
                                 .size(42.dp)
                                 .clip(RoundedCornerShape(8.dp))
-                                .background(Color.White),
+                                .background(c.card),
                             contentAlignment = Alignment.Center
                         ) {
                             if (!userProfile?.profileImageUri.isNullOrBlank()) {
@@ -185,7 +207,7 @@ fun DashboardScreen(
                             } else {
                                 Text(
                                     text = userProfile?.name?.take(1)?.uppercase() ?: "D",
-                                    color = GreenPrimary,
+                                    color = c.greenPrimary,
                                     fontSize = 20.sp,
                                     fontWeight = FontWeight.ExtraBold
                                 )
@@ -196,7 +218,7 @@ fun DashboardScreen(
                             modifier = Modifier.weight(1f)
                         ) {
                             Text(
-                                text = userProfile?.name ?: "Daily Expense & Ledger",
+                                text = userProfile?.name ?: s.appName,
                                 fontSize = 18.sp,
                                 fontWeight = FontWeight.ExtraBold,
                                 color = Color.White,
@@ -213,7 +235,7 @@ fun DashboardScreen(
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Text(
-                                    text = "LEDGER DASHBOARD",
+                                    text = s.ledgerCustomersTitle.uppercase(),
                                     fontSize = 11.sp,
                                     fontWeight = FontWeight.Bold,
                                     color = Color.White.copy(alpha = 0.85f),
@@ -244,7 +266,7 @@ fun DashboardScreen(
                                                 .background(Color.White)
                                         )
                                         Text(
-                                            text = "$formattedCustomerCount Customers",
+                                            text = "$formattedCustomerCount ${s.totalCustomersLabel}",
                                             fontSize = 10.sp,
                                             fontWeight = FontWeight.Bold,
                                             color = Color.White,
@@ -267,16 +289,16 @@ fun DashboardScreen(
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .background(Color.White)
+                        .background(c.background)
                 ) {
                     // Full Width Unified 4-Column Stat Banner
                     Surface(
-                        color = Color.White,
+                        color = c.card,
                         shadowElevation = 2.dp,
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Column {
-                            HorizontalDivider(color = Slate200, thickness = 1.dp)
+                            HorizontalDivider(color = c.border, thickness = 1.dp)
 
                             Row(
                                 modifier = Modifier
@@ -316,11 +338,12 @@ fun DashboardScreen(
                                     horizontalAlignment = Alignment.CenterHorizontally
                                 ) {
                                     Text(
-                                        text = "NET BALANCE",
+                                        text = s.netBalance.uppercase(),
                                         fontSize = 8.sp,
                                         fontWeight = FontWeight.Bold,
-                                        color = Slate500,
-                                        letterSpacing = 0.3.sp
+                                        color = c.textMuted,
+                                        letterSpacing = 0.3.sp,
+                                        maxLines = 1
                                     )
                                     Spacer(modifier = Modifier.height(2.dp))
                                     Text(
@@ -328,13 +351,13 @@ fun DashboardScreen(
                                         fontSize = getFontSizeForText(netText),
                                         fontWeight = FontWeight.ExtraBold,
                                         maxLines = 1,
-                                        color = if (overallNetBalance >= 0) GreenPrimary else RedDebit
+                                        color = if (overallNetBalance >= 0) c.greenPrimary else c.redDebit
                                     )
                                 }
 
                                 VerticalDivider(
                                     modifier = Modifier.height(28.dp),
-                                    color = Slate200
+                                    color = c.border
                                 )
 
                                 // Col 2: You'll Get
@@ -343,11 +366,12 @@ fun DashboardScreen(
                                     horizontalAlignment = Alignment.CenterHorizontally
                                 ) {
                                     Text(
-                                        text = "YOU'LL GET",
+                                        text = s.youllGet,
                                         fontSize = 8.sp,
                                         fontWeight = FontWeight.Bold,
-                                        color = Slate500,
-                                        letterSpacing = 0.3.sp
+                                        color = c.textMuted,
+                                        letterSpacing = 0.3.sp,
+                                        maxLines = 1
                                     )
                                     Spacer(modifier = Modifier.height(2.dp))
                                     Text(
@@ -355,13 +379,13 @@ fun DashboardScreen(
                                         fontSize = getFontSizeForText(get),
                                         fontWeight = FontWeight.ExtraBold,
                                         maxLines = 1,
-                                        color = GreenPrimary
+                                        color = c.greenPrimary
                                     )
                                 }
 
                                 VerticalDivider(
                                     modifier = Modifier.height(28.dp),
-                                    color = Slate200
+                                    color = c.border
                                 )
 
                                 // Col 3: You Gave
@@ -370,11 +394,12 @@ fun DashboardScreen(
                                     horizontalAlignment = Alignment.CenterHorizontally
                                 ) {
                                     Text(
-                                        text = "YOU GAVE",
+                                        text = s.youGave,
                                         fontSize = 8.sp,
                                         fontWeight = FontWeight.Bold,
-                                        color = Slate500,
-                                        letterSpacing = 0.3.sp
+                                        color = c.textMuted,
+                                        letterSpacing = 0.3.sp,
+                                        maxLines = 1
                                     )
                                     Spacer(modifier = Modifier.height(2.dp))
                                     Text(
@@ -382,13 +407,13 @@ fun DashboardScreen(
                                         fontSize = getFontSizeForText(give),
                                         fontWeight = FontWeight.ExtraBold,
                                         maxLines = 1,
-                                        color = RedDebit
+                                        color = c.redDebit
                                     )
                                 }
 
                                 VerticalDivider(
                                     modifier = Modifier.height(28.dp),
-                                    color = Slate200
+                                    color = c.border
                                 )
 
                                 // Col 4: Expenses
@@ -397,11 +422,12 @@ fun DashboardScreen(
                                     horizontalAlignment = Alignment.CenterHorizontally
                                 ) {
                                     Text(
-                                        text = "EXPENSES",
+                                        text = s.expenses,
                                         fontSize = 8.sp,
                                         fontWeight = FontWeight.Bold,
-                                        color = Slate500,
-                                        letterSpacing = 0.3.sp
+                                        color = c.textMuted,
+                                        letterSpacing = 0.3.sp,
+                                        maxLines = 1
                                     )
                                     Spacer(modifier = Modifier.height(2.dp))
                                     Text(
@@ -409,12 +435,12 @@ fun DashboardScreen(
                                         fontSize = getFontSizeForText(exp),
                                         fontWeight = FontWeight.ExtraBold,
                                         maxLines = 1,
-                                        color = RedDebit
+                                        color = c.redDebit
                                     )
                                 }
                             }
 
-                            HorizontalDivider(color = Slate200, thickness = 1.dp)
+                            HorizontalDivider(color = c.border, thickness = 1.dp)
                         }
                     }
 
@@ -425,11 +451,17 @@ fun DashboardScreen(
                     // 3. Backup is currently in progress (IN_PROGRESS)
                     // 4. Backup attempt failed (FAILED)
                     // Automatically hidden when Drive is connected and backup is successfully up-to-date (SUCCESS)
-                    if (backupStatus.state != com.example.utils.BackupState.SUCCESS) {
+                    if (backupStatus.state != com.example.utils.BackupState.SUCCESS ||
+                        (firebaseBackupStatus.state != com.example.utils.BackupState.NOT_CONFIGURED &&
+                            firebaseBackupStatus.state != com.example.utils.BackupState.SUCCESS)
+                    ) {
                         BackupStatusWidget(
                             backupStatus = backupStatus,
+                            firebaseBackupStatus = firebaseBackupStatus,
                             onSyncNow = { viewModel.triggerDriveAutoBackupNow() },
-                            onOpenSettings = onOpenSettings,
+                            onSyncFirebaseNow = { viewModel.syncFirebaseBackupNow() },
+                            onOpenSettings = onOpenGoogleDriveSettings,
+                            onOpenFirebaseSettings = onOpenFirebaseSettings,
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .padding(horizontal = 16.dp, vertical = 6.dp)
@@ -445,25 +477,27 @@ fun DashboardScreen(
                         OutlinedTextField(
                             value = searchQuery,
                             onValueChange = { viewModel.setCustomerSearchQuery(it) },
-                            placeholder = { Text("Search customers", fontSize = 13.sp, color = Slate500) },
-                            leadingIcon = { Icon(Icons.Default.Search, contentDescription = null, tint = GreenPrimary) },
+                            placeholder = { Text(s.searchCustomersPlaceholder, fontSize = 13.sp, color = c.textMuted) },
+                            leadingIcon = { Icon(Icons.Default.Search, contentDescription = null, tint = c.greenPrimary) },
                             trailingIcon = {
                                 if (searchQuery.isNotEmpty()) {
                                     IconButton(onClick = { viewModel.clearCustomerSearchQuery() }) {
-                                        Icon(Icons.Default.Clear, contentDescription = "Clear", tint = Slate700)
+                                        Icon(Icons.Default.Clear, contentDescription = "Clear", tint = c.textSecondary)
                                     }
                                 }
                             },
                             singleLine = true,
-                            textStyle = LocalTextStyle.current.copy(color = Slate900, fontSize = 14.sp, fontWeight = FontWeight.Medium),
+                            textStyle = LocalTextStyle.current.copy(color = c.textPrimary, fontSize = 14.sp, fontWeight = FontWeight.Medium),
                             colors = OutlinedTextFieldDefaults.colors(
-                                unfocusedBorderColor = Slate400,
-                                focusedBorderColor = GreenPrimary,
-                                cursorColor = GreenPrimary,
-                                focusedTextColor = Slate900,
-                                unfocusedTextColor = Slate900,
-                                focusedPlaceholderColor = Slate500,
-                                unfocusedPlaceholderColor = Slate500
+                                unfocusedBorderColor = c.borderStrong,
+                                focusedBorderColor = c.greenPrimary,
+                                cursorColor = c.greenPrimary,
+                                focusedTextColor = c.textPrimary,
+                                unfocusedTextColor = c.textPrimary,
+                                focusedContainerColor = c.card,
+                                unfocusedContainerColor = c.card,
+                                focusedPlaceholderColor = c.textMuted,
+                                unfocusedPlaceholderColor = c.textMuted
                             ),
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -479,12 +513,12 @@ fun DashboardScreen(
                 modifier = Modifier
                     .fillMaxWidth()
                     .weight(1f)
-                    .background(Color.White)
+                    .background(c.background)
                     .padding(horizontal = 16.dp)
             ) {
 
                 // Customer List with Pull-to-Refresh
-                val isRefreshing by viewModel.isRefreshing.collectAsState()
+                val isRefreshing by viewModel.isRefreshing.collectAsStateWithLifecycle()
                 val pullState = androidx.compose.material3.pulltorefresh.rememberPullToRefreshState()
 
                 PullToRefreshBox(
@@ -497,8 +531,8 @@ fun DashboardScreen(
                             state = pullState,
                             isRefreshing = isRefreshing,
                             modifier = Modifier.align(Alignment.TopCenter),
-                            containerColor = Color.White,
-                            color = com.example.ui.theme.GreenPrimary
+                            containerColor = c.card,
+                            color = c.greenPrimary
                         )
                     }
                 ) {
@@ -513,21 +547,21 @@ fun DashboardScreen(
                                 Icon(
                                     imageVector = Icons.Default.GroupOff,
                                     contentDescription = null,
-                                    tint = Slate400,
+                                    tint = c.textMuted,
                                     modifier = Modifier.size(56.dp)
                                 )
                                 Spacer(modifier = Modifier.height(12.dp))
                                 Text(
-                                    text = if (searchQuery.isEmpty()) "No customers found" else "No matching customer found",
+                                    text = if (searchQuery.isEmpty()) s.noCustomersYet else s.noCustomersFound,
                                     fontSize = 16.sp,
                                     fontWeight = FontWeight.Medium,
-                                    color = Slate500
+                                    color = c.textSecondary
                                 )
                                 Spacer(modifier = Modifier.height(8.dp))
                                 Text(
-                                    text = "Tap '+ ADD CUSTOMER' to create your first customer entry.",
+                                    text = if (searchQuery.isEmpty()) s.tapPlusToAddCustomer else s.tryDifferentSearch,
                                     fontSize = 13.sp,
-                                    color = Slate400
+                                    color = c.textMuted
                                 )
                             }
                         }
@@ -549,7 +583,7 @@ fun DashboardScreen(
                                     if (index < filteredSummaries.lastIndex) {
                                         HorizontalDivider(
                                             thickness = 1.dp,
-                                            color = Slate200
+                                            color = c.divider
                                         )
                                     }
                                 }
@@ -566,18 +600,18 @@ fun DashboardScreen(
         val targetCust = customerToDelete!!
         AlertDialog(
             onDismissRequest = { customerToDelete = null },
-            containerColor = Color.White,
+            containerColor = c.card,
             shape = RoundedCornerShape(20.dp),
             properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false),
             modifier = Modifier
                 .fillMaxWidth()
                 .widthIn(max = 480.dp)
                 .padding(horizontal = 16.dp),
-            title = { Text("Delete Customer?", fontWeight = FontWeight.ExtraBold, color = Slate900) },
+            title = { Text("Delete Customer?", fontWeight = FontWeight.ExtraBold, color = c.textPrimary) },
             text = {
                 Text(
                     text = "Are you sure you want to delete ${targetCust.name}? All transaction history for this customer will be removed.",
-                    color = Slate700,
+                    color = c.textSecondary,
                     fontSize = 14.sp
                 )
             },
@@ -588,18 +622,18 @@ fun DashboardScreen(
                         customerToDelete = null
                     },
                     shape = RoundedCornerShape(10.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = RedDebit)
+                    colors = ButtonDefaults.buttonColors(containerColor = c.redDebit)
                 ) {
-                    Text("Delete", fontWeight = FontWeight.Bold, color = Color.White)
+                    Text(s.remove, fontWeight = FontWeight.Bold, color = Color.White)
                 }
             },
             dismissButton = {
                 OutlinedButton(
                     onClick = { customerToDelete = null },
                     shape = RoundedCornerShape(10.dp),
-                    border = androidx.compose.foundation.BorderStroke(1.dp, Slate300)
+                    border = androidx.compose.foundation.BorderStroke(1.dp, c.borderStrong)
                 ) {
-                    Text("Cancel", color = Slate700, fontWeight = FontWeight.SemiBold)
+                    Text(s.cancel, color = c.textSecondary, fontWeight = FontWeight.SemiBold)
                 }
             }
         )
@@ -611,165 +645,200 @@ fun CustomerCardItem(
     summary: CustomerBalanceSummary,
     onClick: () -> Unit
 ) {
+    val c = LedgerTheme.colors
+    val s = LocalAppStrings.current
     val customer = summary.customer
     val netBalance = summary.netBalance
-    val sdf = remember { SimpleDateFormat("dd MMM, hh:mm a", Locale.getDefault()) }
-
-    val avatarColors = remember(customer.id) {
-        val colorPairs = listOf(
-            Color(0xFFFFE0B2) to Color(0xFFE65100), // Orange
-            Color(0xFFE3F2FD) to Color(0xFF1565C0), // Blue
-            Color(0xFFF3E5F5) to Color(0xFF7B1FA2), // Purple
-            Color(0xFFE8F5E9) to Color(0xFF2E7D32)  // Green
-        )
-        colorPairs[(customer.id % colorPairs.size).toInt()]
+    val formattedLastDate = remember(customer.lastUpdatedTimestamp, s.lastEntryPrefix) {
+        val dt = com.example.utils.LedgerDateFormatter.formatLastEntryDateTime(customer.lastUpdatedTimestamp)
+        if (dt.isNotBlank()) "${s.lastEntryPrefix} $dt" else ""
     }
+
+    val colorPairs = listOf(
+        c.amberTint to c.amberAccent,
+        c.blueTint to c.blueAccent,
+        c.indigoTint to c.indigoAccent,
+        c.greenTint to c.greenPrimary
+    )
+    val avatarColors = colorPairs[(customer.id % colorPairs.size).toInt().coerceAtLeast(0)]
 
     Card(
         shape = RoundedCornerShape(0.dp),
-        colors = CardDefaults.cardColors(containerColor = Color.White),
+        colors = CardDefaults.cardColors(containerColor = c.background),
         elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
         modifier = Modifier
             .fillMaxWidth()
             .clickable { onClick() }
             .testTag("customer_item_${customer.id}")
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(vertical = 12.dp, horizontal = 4.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            // Customer Avatar
-            Box(
-                modifier = Modifier
-                    .size(44.dp)
-                    .clip(CircleShape)
-                    .background(avatarColors.first),
-                contentAlignment = Alignment.Center
-            ) {
-                Text(
-                    text = customer.name.take(1).uppercase(),
-                    fontSize = 18.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = avatarColors.second
-                )
+        BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+            val isTightWidth = maxWidth < 360.dp
+            val baseDateFontSize = when {
+                maxWidth < 340.dp -> 10.sp
+                maxWidth < 420.dp -> 11.sp
+                else -> 12.sp
+            }
+            var adjustedDateFontSize by remember(customer.lastUpdatedTimestamp, maxWidth) {
+                mutableStateOf(baseDateFontSize)
             }
 
-            Spacer(modifier = Modifier.width(12.dp))
-
-            // Info Column
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = customer.name,
-                    fontSize = 15.sp,
-                    fontWeight = FontWeight.ExtraBold,
-                    color = Slate900,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.fillMaxWidth()
-                )
-
-                Spacer(modifier = Modifier.height(2.dp))
-
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 12.dp, horizontal = 4.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                // Customer Avatar
+                Box(
+                    modifier = Modifier
+                        .size(if (isTightWidth) 40.dp else 44.dp)
+                        .clip(CircleShape)
+                        .background(avatarColors.first),
+                    contentAlignment = Alignment.Center
                 ) {
                     Text(
-                        text = if (summary.lastTransactionDate != null) "Last entry ${sdf.format(Date(summary.lastTransactionDate))}" else if (customer.mobileNumber.isNotBlank()) customer.mobileNumber else "No phone",
-                        fontSize = 12.sp,
-                        color = Slate500,
+                        text = customer.name.take(1).uppercase(),
+                        fontSize = if (isTightWidth) 16.sp else 18.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = avatarColors.second
+                    )
+                }
+
+                Spacer(modifier = Modifier.width(if (isTightWidth) 10.dp else 12.dp))
+
+                // Info Column (weight(1f) guarantees customer name & balance never shift across 320px-768px)
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = customer.name,
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = c.textPrimary,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f, fill = false)
+                        modifier = Modifier.fillMaxWidth()
                     )
 
-                    if (customer.collectToday || customer.collectDueDate != null) {
-                        val endOfTodayMs = java.util.Calendar.getInstance(java.util.TimeZone.getTimeZone("UTC")).apply {
-                            set(java.util.Calendar.HOUR_OF_DAY, 23)
-                            set(java.util.Calendar.MINUTE, 59)
-                            set(java.util.Calendar.SECOND, 59)
-                            set(java.util.Calendar.MILLISECOND, 999)
-                        }.timeInMillis
+                    Spacer(modifier = Modifier.height(2.dp))
 
-                        val isPastOrToday = if (customer.collectDueDate != null) {
-                            customer.collectDueDate!! <= endOfTodayMs
-                        } else {
-                            true
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        val subtitleText = when {
+                            formattedLastDate.isNotBlank() -> formattedLastDate
+                            customer.mobileNumber.isNotBlank() -> customer.mobileNumber
+                            else -> "No activity"
                         }
-
-                        val badgeBgColor = if (isPastOrToday) RedLight else GreenLight
-                        val badgeTextColor = if (isPastOrToday) RedDebit else GreenPrimary
-
-                        Surface(
-                            shape = RoundedCornerShape(4.dp),
-                            color = badgeBgColor
-                        ) {
-                            val badgeText = if (customer.collectDueDate != null) {
-                                val sdfBadge = SimpleDateFormat("dd MMM yyyy", Locale.getDefault()).apply {
-                                    timeZone = java.util.TimeZone.getTimeZone("UTC")
+                        Text(
+                            text = subtitleText,
+                            fontSize = adjustedDateFontSize,
+                            color = c.textMuted,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis,
+                            onTextLayout = { layoutResult ->
+                                if (layoutResult.hasVisualOverflow && adjustedDateFontSize.value > 9f) {
+                                    adjustedDateFontSize = (adjustedDateFontSize.value - 1f).sp
                                 }
-                                "DUE: " + sdfBadge.format(Date(customer.collectDueDate!!)).uppercase()
+                            },
+                            modifier = Modifier
+                                .weight(1f, fill = false)
+                                .testTag("customer_last_entry_${customer.id}")
+                        )
+
+                        if (customer.collectToday || customer.collectDueDate != null) {
+                            val endOfTodayMs = java.util.Calendar.getInstance(java.util.TimeZone.getTimeZone("UTC")).apply {
+                                set(java.util.Calendar.HOUR_OF_DAY, 23)
+                                set(java.util.Calendar.MINUTE, 59)
+                                set(java.util.Calendar.SECOND, 59)
+                                set(java.util.Calendar.MILLISECOND, 999)
+                            }.timeInMillis
+
+                            val isPastOrToday = if (customer.collectDueDate != null) {
+                                customer.collectDueDate!! <= endOfTodayMs
                             } else {
-                                "COLLECT TODAY"
+                                true
                             }
-                            Text(
-                                text = badgeText,
-                                fontSize = 8.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = badgeTextColor,
-                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp),
-                                letterSpacing = 0.2.sp
-                            )
+
+                            val badgeBgColor = if (isPastOrToday) c.redTint else c.greenTint
+                            val badgeTextColor = if (isPastOrToday) c.redDebit else c.greenPrimary
+
+                            Surface(
+                                shape = RoundedCornerShape(4.dp),
+                                color = badgeBgColor
+                            ) {
+                                val badgeText = if (customer.collectDueDate != null) {
+                                    val sdfBadge = SimpleDateFormat("dd MMM yyyy", Locale.getDefault()).apply {
+                                        timeZone = java.util.TimeZone.getTimeZone("UTC")
+                                    }
+                                    "DUE: " + sdfBadge.format(Date(customer.collectDueDate!!)).uppercase()
+                                } else {
+                                    s.collectTodayBadge.uppercase()
+                                }
+                                Text(
+                                    text = badgeText,
+                                    fontSize = 8.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = badgeTextColor,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp),
+                                    letterSpacing = 0.2.sp
+                                )
+                            }
                         }
                     }
                 }
-            }
 
-            Spacer(modifier = Modifier.width(6.dp))
+                Spacer(modifier = Modifier.width(6.dp))
 
-            // Balance in Red indication for Deduction customers, or normal status
-            val isDeductionCustomer = customer.name.contains("Deduction", ignoreCase = true)
+                // Balance in Red indication for Deduction customers, or normal status
+                val isDeductionCustomer = customer.name.contains("Deduction", ignoreCase = true)
 
-            Column(horizontalAlignment = Alignment.End) {
-                if (isDeductionCustomer) {
-                    val expenseVal = if (netBalance != 0.0) Math.abs(netBalance) else summary.totalPaid
-                    Text(
-                        text = String.format("₹ %,.0f", expenseVal),
-                        fontSize = 16.sp,
-                        fontWeight = FontWeight.ExtraBold,
-                        color = RedDebit
-                    )
-                    Text("Expense", fontSize = 10.sp, color = RedDebit, fontWeight = FontWeight.Bold)
-                } else {
-                    when {
-                        netBalance > 0.01 -> {
-                            Text(
-                                text = String.format("₹ %,.0f", netBalance),
-                                fontSize = 16.sp,
-                                fontWeight = FontWeight.ExtraBold,
-                                color = GreenPrimary
-                            )
-                            Text("You'll Get", fontSize = 10.sp, color = GreenPrimary, fontWeight = FontWeight.Bold)
-                        }
-                        netBalance < -0.01 -> {
-                            Text(
-                                text = String.format("₹ %,.0f", Math.abs(netBalance)),
-                                fontSize = 16.sp,
-                                fontWeight = FontWeight.ExtraBold,
-                                color = RedDebit
-                            )
-                            Text("You'll Give", fontSize = 10.sp, color = RedDebit, fontWeight = FontWeight.Bold)
-                        }
-                        else -> {
-                            Text(
-                                text = "₹ 0",
-                                fontSize = 15.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = Slate400
-                            )
-                            Text("Settled", fontSize = 10.sp, color = Slate400)
+                Column(horizontalAlignment = Alignment.End) {
+                    if (isDeductionCustomer) {
+                        val expenseVal = if (netBalance != 0.0) Math.abs(netBalance) else summary.totalPaid
+                        Text(
+                            text = String.format("₹ %,.0f", expenseVal),
+                            fontSize = if (isTightWidth) 14.5.sp else 16.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = c.redDebit,
+                            maxLines = 1
+                        )
+                        Text(s.expenses, fontSize = 10.sp, color = c.redDebit, fontWeight = FontWeight.Bold, maxLines = 1)
+                    } else {
+                        when {
+                            netBalance > 0.01 -> {
+                                Text(
+                                    text = String.format("₹ %,.0f", netBalance),
+                                    fontSize = if (isTightWidth) 14.5.sp else 16.sp,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = c.greenPrimary,
+                                    maxLines = 1
+                                )
+                                Text(s.youllGet, fontSize = 10.sp, color = c.greenPrimary, fontWeight = FontWeight.Bold, maxLines = 1)
+                            }
+                            netBalance < -0.01 -> {
+                                Text(
+                                    text = String.format("₹ %,.0f", Math.abs(netBalance)),
+                                    fontSize = if (isTightWidth) 14.5.sp else 16.sp,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = c.redDebit,
+                                    maxLines = 1
+                                )
+                                Text(s.youGave, fontSize = 10.sp, color = c.redDebit, fontWeight = FontWeight.Bold, maxLines = 1)
+                            }
+                            else -> {
+                                Text(
+                                    text = "₹ 0",
+                                    fontSize = if (isTightWidth) 14.sp else 15.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = c.textMuted,
+                                    maxLines = 1
+                                )
+                                Text(s.settled, fontSize = 10.sp, color = c.textMuted, maxLines = 1)
+                            }
                         }
                     }
                 }
@@ -790,131 +859,236 @@ private data class BackupDisplayData(
 @Composable
 fun BackupStatusWidget(
     backupStatus: com.example.utils.DriveBackupStatus,
+    firebaseBackupStatus: com.example.utils.FirebaseBackupStatus = com.example.utils.FirebaseBackupStatus(),
     onSyncNow: () -> Unit,
+    onSyncFirebaseNow: () -> Unit = {},
     onOpenSettings: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    onOpenFirebaseSettings: () -> Unit = onOpenSettings
 ) {
-    val displayData = when (backupStatus.state) {
+    val c = LedgerTheme.colors
+    val s = LocalAppStrings.current
+    val driveDisplayData = when (backupStatus.state) {
         com.example.utils.BackupState.SUCCESS -> {
             BackupDisplayData(
-                bgColor = Color(0xFFF0FDF4),
-                borderColor = Color(0xFFBBF7D0),
+                bgColor = c.greenTint,
+                borderColor = c.greenBorder,
                 icon = Icons.Default.CloudDone,
-                iconColor = Color(0xFF16A34A),
-                title = "Drive Backup: Up to date",
-                subtitle = backupStatus.lastBackupFormatted?.let { "Last synced $it • DailyExpenseBackups" }
+                iconColor = c.greenPrimary,
+                title = s.driveBackupConnected,
+                subtitle = backupStatus.lastBackupFormatted?.let { "Synced $it • DailyExpenseBackups" }
                     ?: "Auto-synced to DailyExpenseBackups"
             )
         }
         com.example.utils.BackupState.PENDING_OFFLINE -> {
             BackupDisplayData(
-                bgColor = Color(0xFFFFFBEB),
-                borderColor = Color(0xFFFDE68A),
+                bgColor = c.amberTint,
+                borderColor = c.amberBorder,
                 icon = Icons.Default.CloudQueue,
-                iconColor = Color(0xFFD97706),
-                title = "Drive Backup Queued (Offline)",
-                subtitle = "Changes saved locally. Will auto-upload when reconnected"
+                iconColor = c.amberAccent,
+                title = s.driveBackupQueued,
+                subtitle = "Will upload automatically when connected"
             )
         }
         com.example.utils.BackupState.FAILED -> {
             BackupDisplayData(
-                bgColor = Color(0xFFFEF2F2),
-                borderColor = Color(0xFFFECACA),
+                bgColor = c.redTint,
+                borderColor = c.redBorder,
                 icon = Icons.Default.CloudOff,
-                iconColor = Color(0xFFDC2626),
-                title = "Drive Backup Failed",
-                subtitle = "${backupStatus.errorMessage ?: "Upload could not be completed"} • Tap to retry"
+                iconColor = c.redDebit,
+                title = s.driveBackupRetry,
+                subtitle = backupStatus.errorMessage ?: "Tap to retry backup"
             )
         }
         com.example.utils.BackupState.IN_PROGRESS -> {
             BackupDisplayData(
-                bgColor = Color(0xFFEFF6FF),
-                borderColor = Color(0xFFBFDBFE),
+                bgColor = c.blueTint,
+                borderColor = c.blueBorder,
                 icon = Icons.Default.Sync,
-                iconColor = Color(0xFF2563EB),
-                title = "Backing up to Google Drive...",
-                subtitle = "Uploading snapshot to DailyExpenseBackups folder"
+                iconColor = c.blueAccent,
+                title = "${s.googleDriveTitle} • Syncing...",
+                subtitle = "Uploading snapshot to DailyExpenseBackups"
             )
         }
         com.example.utils.BackupState.NOT_CONFIGURED -> {
             BackupDisplayData(
-                bgColor = Color(0xFFF8FAFC),
-                borderColor = Color(0xFFE2E8F0),
+                bgColor = c.card,
+                borderColor = c.border,
                 icon = Icons.Default.CloudUpload,
-                iconColor = Slate500,
-                title = "Google Drive Backup Not Connected",
-                subtitle = "Tap to connect Drive folder for automated cloud backups"
+                iconColor = c.textMuted,
+                title = s.driveBackupNotConnected,
+                subtitle = s.tapToConnectDrive
             )
         }
     }
 
+    val firebaseBadgeText = when (firebaseBackupStatus.state) {
+        com.example.utils.BackupState.SUCCESS -> "CLOUD SYNCED"
+        com.example.utils.BackupState.PENDING_OFFLINE -> "QUEUED"
+        com.example.utils.BackupState.FAILED -> "RETRY"
+        com.example.utils.BackupState.IN_PROGRESS -> "SYNCING"
+        com.example.utils.BackupState.NOT_CONFIGURED -> "SIGN IN"
+    }
+
+    val driveBadgeText = when (backupStatus.state) {
+        com.example.utils.BackupState.SUCCESS -> "DRIVE CONNECTED"
+        com.example.utils.BackupState.PENDING_OFFLINE -> "QUEUED"
+        com.example.utils.BackupState.FAILED -> "FAILED"
+        com.example.utils.BackupState.IN_PROGRESS -> "SYNCING"
+        com.example.utils.BackupState.NOT_CONFIGURED -> "CONNECT"
+    }
+
     Surface(
-        color = displayData.bgColor,
-        shape = RoundedCornerShape(12.dp),
-        border = androidx.compose.foundation.BorderStroke(1.dp, displayData.borderColor),
-        modifier = modifier
-            .clip(RoundedCornerShape(12.dp))
-            .clickable {
-                if (backupStatus.state == com.example.utils.BackupState.NOT_CONFIGURED) {
-                    onOpenSettings()
+        color = driveDisplayData.bgColor,
+        shape = RoundedCornerShape(14.dp),
+        border = androidx.compose.foundation.BorderStroke(1.dp, driveDisplayData.borderColor),
+        modifier = modifier.testTag("backup_status_widget")
+    ) {
+        Column(modifier = Modifier.fillMaxWidth()) {
+            // 1. Google Drive Backup Row
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable {
+                        if (backupStatus.state == com.example.utils.BackupState.NOT_CONFIGURED) {
+                            onOpenSettings()
+                        } else {
+                            onSyncNow()
+                        }
+                    }
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                if (backupStatus.state == com.example.utils.BackupState.IN_PROGRESS) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(18.dp),
+                        strokeWidth = 2.dp,
+                        color = driveDisplayData.iconColor
+                    )
                 } else {
-                    onSyncNow()
+                    Icon(
+                        imageVector = driveDisplayData.icon,
+                        contentDescription = "Google Drive Backup Status",
+                        tint = driveDisplayData.iconColor,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = driveDisplayData.title,
+                        fontSize = 11.5.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = c.textPrimary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        text = driveDisplayData.subtitle,
+                        fontSize = 10.sp,
+                        color = c.textSecondary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+
+                Surface(
+                    shape = RoundedCornerShape(6.dp),
+                    color = driveDisplayData.iconColor.copy(alpha = 0.14f)
+                ) {
+                    Text(
+                        text = driveBadgeText,
+                        fontSize = 9.sp,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = driveDisplayData.iconColor,
+                        maxLines = 1,
+                        softWrap = false,
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp)
+                    )
                 }
             }
-            .testTag("backup_status_widget")
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 7.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
-            if (backupStatus.state == com.example.utils.BackupState.IN_PROGRESS) {
-                CircularProgressIndicator(
-                    modifier = Modifier.size(18.dp),
-                    strokeWidth = 2.dp,
-                    color = displayData.iconColor
-                )
-            } else {
-                Icon(
-                    imageVector = displayData.icon,
-                    contentDescription = "Backup Status",
-                    tint = displayData.iconColor,
-                    modifier = Modifier.size(18.dp)
-                )
+
+            HorizontalDivider(color = driveDisplayData.borderColor.copy(alpha = 0.7f))
+
+            // 2. Firebase Cloud Backup Row (Completely separate status & action)
+            val fbColor = when (firebaseBackupStatus.state) {
+                com.example.utils.BackupState.SUCCESS -> c.greenPrimary
+                com.example.utils.BackupState.PENDING_OFFLINE -> c.amberAccent
+                com.example.utils.BackupState.FAILED -> c.redDebit
+                com.example.utils.BackupState.IN_PROGRESS -> c.blueAccent
+                com.example.utils.BackupState.NOT_CONFIGURED -> c.textMuted
+            }
+            val fbSubtitle = when (firebaseBackupStatus.state) {
+                com.example.utils.BackupState.NOT_CONFIGURED -> s.firebaseBackupSubtitleSignedOut
+                com.example.utils.BackupState.IN_PROGRESS -> "Syncing encrypted chunks to Firebase..."
+                com.example.utils.BackupState.PENDING_OFFLINE -> "Offline • Queued for cloud sync"
+                com.example.utils.BackupState.FAILED -> firebaseBackupStatus.errorMessage ?: "Tap to retry Firebase backup"
+                com.example.utils.BackupState.SUCCESS -> {
+                    val timePart = firebaseBackupStatus.lastBackupFormatted ?: "Ready"
+                    "$timePart • ${firebaseBackupStatus.snapshotCount} snapshot(s)"
+                }
             }
 
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = displayData.title,
-                    fontSize = 11.5.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = Slate900,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-                Text(
-                    text = displayData.subtitle,
-                    fontSize = 10.sp,
-                    color = Slate600,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-            }
-
-            if (backupStatus.state == com.example.utils.BackupState.FAILED ||
-                backupStatus.state == com.example.utils.BackupState.PENDING_OFFLINE ||
-                backupStatus.state == com.example.utils.BackupState.SUCCESS) {
-                IconButton(
-                    onClick = onSyncNow,
-                    modifier = Modifier.size(24.dp)
-                ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable {
+                        if (firebaseBackupStatus.state == com.example.utils.BackupState.NOT_CONFIGURED) {
+                            onOpenFirebaseSettings()
+                        } else {
+                            onSyncFirebaseNow()
+                        }
+                    }
+                    .padding(horizontal = 12.dp, vertical = 7.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                if (firebaseBackupStatus.state == com.example.utils.BackupState.IN_PROGRESS) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(16.dp),
+                        strokeWidth = 2.dp,
+                        color = fbColor
+                    )
+                } else {
                     Icon(
-                        imageVector = Icons.Default.Refresh,
-                        contentDescription = "Sync Now",
-                        tint = displayData.iconColor,
-                        modifier = Modifier.size(15.dp)
+                        imageVector = Icons.Default.Backup,
+                        contentDescription = "Firebase Backup Status",
+                        tint = fbColor,
+                        modifier = Modifier.size(16.dp)
+                    )
+                }
+
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = s.firebaseBackupTitle,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = c.textPrimary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        text = fbSubtitle,
+                        fontSize = 9.5.sp,
+                        color = c.textSecondary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+
+                Surface(
+                    shape = RoundedCornerShape(6.dp),
+                    color = fbColor.copy(alpha = 0.14f)
+                ) {
+                    Text(
+                        text = firebaseBadgeText,
+                        fontSize = 9.sp,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = fbColor,
+                        maxLines = 1,
+                        softWrap = false,
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp)
                     )
                 }
             }

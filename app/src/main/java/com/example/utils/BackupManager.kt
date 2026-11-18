@@ -85,8 +85,15 @@ object BackupManager {
     
     // Retention policies
     private const val MAX_LOCAL_BACKUP_DAYS = 2
-    const val MAX_DRIVE_BACKUP_DAYS = 3
+    const val MAX_DRIVE_BACKUP_DAYS = 7
     const val DEDICATED_FOLDER_NAME = "DailyExpenseBackups"
+
+    data class BackupExportPackage(
+        val jsonString: String,
+        val customerCount: Int,
+        val transactionCount: Int,
+        val hasUserProfile: Boolean
+    )
 
     private val backupScope = CoroutineScope(Dispatchers.IO + Job())
     private val backupMutex = Mutex()
@@ -106,20 +113,27 @@ object BackupManager {
 
     /**
      * Initializes network monitoring so queued offline backups are automatically
-     * sent to Google Drive as soon as network connectivity is restored.
+     * sent to Google Drive / Firebase as soon as network connectivity is restored.
      */
     fun init(context: Context) {
         val appContext = context.applicationContext
+        AppPreferencesManager.init(appContext)
         refreshBackupStatus(appContext)
         registerNetworkMonitor(appContext)
 
-        // If app launched and there are pending offline backups and we're online, run them immediately
-        if (hasPendingDriveBackup(appContext) && getDriveFolderUri(appContext) != null) {
+        val hasDrivePending = hasPendingDriveBackup(appContext) &&
+            getDriveFolderUri(appContext) != null &&
+            AppPreferencesManager.isDriveAutoBackupEnabled(appContext)
+        val hasFirebasePending = AppPreferencesManager.hasPendingFirebaseBackup(appContext) &&
+            isFirebaseAutoBackupReady(appContext)
+
+        if (hasDrivePending || hasFirebasePending) {
             Log.d(TAG, "Init: Detected pending offline backup. Enqueueing WorkManager task...")
             enqueueDriveBackupWork(appContext)
             if (isNetworkAvailable(appContext)) {
                 backupScope.launch {
-                    performPendingDriveBackup(appContext)
+                    if (hasDrivePending) performPendingDriveBackup(appContext)
+                    if (hasFirebasePending) performPendingFirebaseBackup(appContext)
                 }
             }
         }
@@ -137,12 +151,18 @@ object BackupManager {
 
                 cm.registerNetworkCallback(networkRequest, object : ConnectivityManager.NetworkCallback() {
                     override fun onAvailable(network: Network) {
-                        Log.d(TAG, "Network connection restored. Checking for queued Drive backups...")
-                        if (hasPendingDriveBackup(context) && getDriveFolderUri(context) != null) {
-                            Log.d(TAG, "Network restored & pending Drive backup detected! Auto-uploading queued backup...")
+                        Log.d(TAG, "Network connection restored. Checking for queued cloud backups...")
+                        val driveReady = hasPendingDriveBackup(context) &&
+                            getDriveFolderUri(context) != null &&
+                            AppPreferencesManager.isDriveAutoBackupEnabled(context)
+                        val firebaseReady = AppPreferencesManager.hasPendingFirebaseBackup(context) &&
+                            isFirebaseAutoBackupReady(context)
+
+                        if (driveReady || firebaseReady) {
                             enqueueDriveBackupWork(context)
                             backupScope.launch {
-                                performPendingDriveBackup(context)
+                                if (driveReady) performPendingDriveBackup(context)
+                                if (firebaseReady) performPendingFirebaseBackup(context)
                             }
                         }
                     }
@@ -155,6 +175,13 @@ object BackupManager {
                                 BackupState.PENDING_OFFLINE,
                                 getLastDriveBackupTime(context),
                                 "Offline: queued for automatic upload"
+                            )
+                        }
+                        if (AppPreferencesManager.hasPendingFirebaseBackup(context) && isFirebaseSignedIn(context)) {
+                            AppPreferencesManager.updateFirebaseStatus(
+                                context = context,
+                                state = BackupState.PENDING_OFFLINE,
+                                errorMessage = "Offline: queued for automatic cloud sync"
                             )
                         }
                     }
@@ -219,21 +246,33 @@ object BackupManager {
         val appContext = context.applicationContext
         markDataChanged(appContext)
 
-        if (getDriveFolderUri(appContext) != null) {
-            if (!isNetworkAvailable(appContext)) {
-                setPendingDriveBackup(appContext, true)
-                updateBackupStatus(
-                    appContext,
-                    BackupState.PENDING_OFFLINE,
-                    getLastDriveBackupTime(appContext),
-                    "Offline: queued for automatic upload"
-                )
-            }
-            // Enqueue WorkManager background task to guarantee automatic retry with network constraints
+        val online = isNetworkAvailable(appContext)
+        val driveConfigured = getDriveFolderUri(appContext) != null &&
+            AppPreferencesManager.isDriveAutoBackupEnabled(appContext)
+        val firebaseConfigured = isFirebaseAutoBackupReady(appContext)
+
+        if (driveConfigured && !online) {
+            setPendingDriveBackup(appContext, true)
+            updateBackupStatus(
+                appContext,
+                BackupState.PENDING_OFFLINE,
+                getLastDriveBackupTime(appContext),
+                "Offline: queued for automatic upload"
+            )
+        }
+        if (firebaseConfigured && !online) {
+            AppPreferencesManager.setPendingFirebaseBackup(appContext, true)
+            AppPreferencesManager.updateFirebaseStatus(
+                context = appContext,
+                state = BackupState.PENDING_OFFLINE,
+                errorMessage = "Offline: queued for automatic cloud sync"
+            )
+        }
+        if (driveConfigured || firebaseConfigured) {
             enqueueDriveBackupWork(appContext)
         }
 
-        // Debounce immediate local + Drive auto-backup pipeline
+        // Debounce immediate local + Drive + Firebase auto-backup pipeline
         debounceJob?.cancel()
         debounceJob = backupScope.launch {
             delay(350)
@@ -242,8 +281,8 @@ object BackupManager {
     }
 
     /**
-     * Enqueues a WorkManager task that automatically runs the Google Drive auto-backup
-     * when network is connected, and retries automatically without requiring user intervention.
+     * Enqueues a WorkManager task that automatically runs Drive & Firebase auto-backups
+     * when network is connected, retrying automatically on failure or reconnection.
      */
     fun enqueueDriveBackupWork(context: Context) {
         try {
@@ -274,41 +313,37 @@ object BackupManager {
 
     /**
      * Executes the automatic backup pipeline:
-     * 1. Exports database to JSON.
+     * 1. Exports database + userProfile + Base64 attachments to unified JSON.
      * 2. Writes local daily backup (2-day rolling window).
-     * 3. If Google Drive is connected:
-     *    - If online: performs Drive backup into dedicated "DailyExpenseBackups" folder.
-     *    - If offline: marks pending Drive backup and updates status to PENDING_OFFLINE.
+     * 3. Runs Google Drive auto-backup (if connected & enabled, 7-day retention).
+     * 4. Runs Firebase Cloud Firestore auto-backup independently (if signed in & enabled, 7-day retention).
      */
     private suspend fun executeAutoBackupPipeline(context: Context) = withContext(Dispatchers.IO) {
         backupMutex.withLock {
             try {
                 Log.d(TAG, "Starting automatic backup pipeline following data change...")
-                val jsonString = exportDatabaseToJson(context)
+                val pkg = exportFullBackupPackage(context)
+                val jsonString = pkg.jsonString
                 if (jsonString.isBlank()) {
                     Log.w(TAG, "Exported JSON is empty, skipping auto-backup.")
                     return@withLock
                 }
 
-                // 1. Local Daily Backup
+                // 1. Local Daily Backup (always 2-day rolling)
                 performDailyBackup(context, jsonString)
 
-                // 2. Google Drive Auto-Backup
+                // 2. Google Drive Auto-Backup (isolated error handling)
                 val driveFolderUri = getDriveFolderUri(context)
-                if (driveFolderUri != null) {
+                if (driveFolderUri != null && AppPreferencesManager.isDriveAutoBackupEnabled(context)) {
                     val online = isNetworkAvailable(context)
                     if (online) {
-                        Log.d(TAG, "Device is ONLINE. Triggering immediate Google Drive auto-backup...")
                         updateBackupStatus(context, BackupState.IN_PROGRESS, getLastDriveBackupTime(context), null)
                         val success = performDriveAutoBackup(context, jsonString)
                         if (success) {
                             val now = System.currentTimeMillis()
                             setPendingDriveBackup(context, false)
-                            markBackupCompleted(context)
                             updateBackupStatus(context, BackupState.SUCCESS, now, null)
-                            Log.d(TAG, "Google Drive auto-backup completed successfully following change.")
                         } else {
-                            Log.w(TAG, "Drive upload failed. Queueing pending backup for retry...")
                             setPendingDriveBackup(context, true)
                             updateBackupStatus(
                                 context,
@@ -319,7 +354,6 @@ object BackupManager {
                             enqueueDriveBackupWork(context)
                         }
                     } else {
-                        Log.d(TAG, "Device is OFFLINE. Queued pending backup for automatic Google Drive sync upon reconnection.")
                         setPendingDriveBackup(context, true)
                         updateBackupStatus(
                             context,
@@ -329,10 +363,12 @@ object BackupManager {
                         )
                         enqueueDriveBackupWork(context)
                     }
-                } else {
-                    Log.d(TAG, "No Google Drive folder connected. Local backup updated.")
+                } else if (driveFolderUri == null) {
                     updateBackupStatus(context, BackupState.NOT_CONFIGURED, 0L, null)
                 }
+
+                // 3. Firebase Cloud Auto-Backup (completely independent of Drive status)
+                syncFirebaseBackupLocked(context, pkg)
 
                 markBackupCompleted(context)
             } catch (e: Exception) {
@@ -434,16 +470,97 @@ object BackupManager {
     }
 
     private fun formatTimestamp(timestamp: Long): String {
-        val now = Calendar.getInstance()
-        val backupCal = Calendar.getInstance().apply { timeInMillis = timestamp }
-        val timeFormat = SimpleDateFormat("hh:mm a", Locale.getDefault())
-        val dateFormat = SimpleDateFormat("dd MMM, hh:mm a", Locale.getDefault())
+        return LedgerDateFormatter.formatRelativeTimestamp(timestamp)
+    }
 
-        return if (now.get(Calendar.YEAR) == backupCal.get(Calendar.YEAR) &&
-            now.get(Calendar.DAY_OF_YEAR) == backupCal.get(Calendar.DAY_OF_YEAR)) {
-            "Today at ${timeFormat.format(Date(timestamp))}"
-        } else {
-            dateFormat.format(Date(timestamp))
+    fun isFirebaseSignedIn(context: Context): Boolean {
+        return try {
+            com.google.firebase.FirebaseApp.getApps(context).isNotEmpty() &&
+                com.example.auth.GoogleAuthHelper.getCurrentFirebaseUser() != null
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    fun isFirebaseAutoBackupReady(context: Context): Boolean {
+        return isFirebaseSignedIn(context) && AppPreferencesManager.isFirebaseAutoBackupEnabled(context)
+    }
+
+    suspend fun performPendingFirebaseBackup(context: Context): Boolean = withContext(Dispatchers.IO) {
+        if (!isFirebaseAutoBackupReady(context)) return@withContext false
+        backupMutex.withLock {
+            val pkg = exportFullBackupPackage(context)
+            if (pkg.jsonString.isBlank()) return@withLock false
+            syncFirebaseBackupLocked(context, pkg)
+        }
+    }
+
+    internal suspend fun syncFirebaseBackupLocked(context: Context, pkg: BackupExportPackage): Boolean {
+        if (!isFirebaseSignedIn(context)) {
+            AppPreferencesManager.refreshFirebaseStatus(context, isSignedIn = false, userEmail = null)
+            return false
+        }
+        if (!AppPreferencesManager.isFirebaseAutoBackupEnabled(context)) {
+            return false
+        }
+        val userEmail = com.example.auth.GoogleAuthHelper.getCurrentAccountInfo()?.email
+        if (!isNetworkAvailable(context)) {
+            AppPreferencesManager.setPendingFirebaseBackup(context, true)
+            AppPreferencesManager.updateFirebaseStatus(
+                context = context,
+                state = BackupState.PENDING_OFFLINE,
+                errorMessage = "Offline: waiting for network connection",
+                userEmail = userEmail
+            )
+            return false
+        }
+        return try {
+            AppPreferencesManager.updateFirebaseStatus(
+                context = context,
+                state = BackupState.IN_PROGRESS,
+                errorMessage = null,
+                userEmail = userEmail
+            )
+            val repo = com.example.data.remote.FirebaseBackupRepository(context)
+            val uploadResult = repo.uploadDailyBackup(
+                jsonString = pkg.jsonString,
+                customerCount = pkg.customerCount,
+                transactionCount = pkg.transactionCount,
+                hasUserProfile = pkg.hasUserProfile
+            )
+            if (uploadResult.isSuccess) {
+                val now = System.currentTimeMillis()
+                val snapshots = repo.listBackups().getOrNull()
+                AppPreferencesManager.setPendingFirebaseBackup(context, false)
+                AppPreferencesManager.updateFirebaseStatus(
+                    context = context,
+                    state = BackupState.SUCCESS,
+                    timestamp = now,
+                    errorMessage = null,
+                    userEmail = userEmail,
+                    snapshotCount = snapshots?.size ?: 1
+                )
+                true
+            } else {
+                val msg = uploadResult.exceptionOrNull()?.localizedMessage ?: "Firebase cloud sync failed"
+                AppPreferencesManager.setPendingFirebaseBackup(context, true)
+                AppPreferencesManager.updateFirebaseStatus(
+                    context = context,
+                    state = BackupState.FAILED,
+                    errorMessage = msg,
+                    userEmail = userEmail
+                )
+                false
+            }
+        } catch (e: Exception) {
+            AppPreferencesManager.setPendingFirebaseBackup(context, true)
+            AppPreferencesManager.updateFirebaseStatus(
+                context = context,
+                state = BackupState.FAILED,
+                errorMessage = e.message ?: "Firebase cloud sync failed",
+                userEmail = userEmail
+            )
+            false
         }
     }
 
@@ -472,7 +589,8 @@ object BackupManager {
             try {
                 Log.d(TAG, "Executing pending Google Drive backup...")
                 updateBackupStatus(context, BackupState.IN_PROGRESS, getLastDriveBackupTime(context), null)
-                val jsonString = exportDatabaseToJson(context)
+                val pkg = exportFullBackupPackage(context)
+                val jsonString = pkg.jsonString
                 if (jsonString.isNotBlank()) {
                     val success = performDriveAutoBackup(context, jsonString)
                     if (success) {
@@ -672,15 +790,56 @@ object BackupManager {
         }
     }
 
+    private fun multiPathToBase64Array(context: Context, multiPathString: String?): JSONArray {
+        val jsonArray = JSONArray()
+        if (multiPathString.isNullOrBlank()) return jsonArray
+        val paths = multiPathString.split(Regex("[|,]")).map { it.trim() }.filter { it.isNotBlank() }
+        paths.forEach { path ->
+            val base64 = ImageUtils.encodeImageToBase64(context, path, maxDimension = 1600, quality = 88)
+            if (!base64.isNullOrBlank()) {
+                jsonArray.put(base64)
+            }
+        }
+        return jsonArray
+    }
+
     /**
-     * Exports full database directly to JSON.
+     * Unified JSON export used by Local, Google Drive, and Firebase backups:
+     * includes customers, transactions, monthlyExpenses, compressed Base64 attachments,
+     * and the current userProfile + Base64 avatar.
      */
-    suspend fun exportDatabaseToJson(context: Context): String = withContext(Dispatchers.IO) {
+    suspend fun exportFullBackupPackage(context: Context): BackupExportPackage = withContext(Dispatchers.IO) {
         try {
             val db = AppDatabase.getDatabase(context)
             val customers = db.customerDao().getAllCustomersDirect()
             val transactions = db.transactionDao().getAllTransactionsDirect()
             val expenses = db.monthlyExpenseDao().getAllExpensesDirect()
+
+            val userPrefs = context.getSharedPreferences("user_prefs", Context.MODE_PRIVATE)
+            val profileName = userPrefs.getString("user_name", "Kundan Sinh") ?: "Kundan Sinh"
+            val profilePhone = userPrefs.getString("user_phone", "1234567890") ?: "1234567890"
+            val profileEmail = userPrefs.getString("user_email", "Store@gmail.com") ?: "Store@gmail.com"
+            val profileBusiness = userPrefs.getString("business_name", "General Store").let {
+                if (it == "Only General store" || it == "Rajesh General Store") "General Store" else (it ?: "General Store")
+            }
+            val savedProfileUri = userPrefs.getString("profile_image_uri", null)
+            val fallbackAvatarFile = File(context.filesDir, "user_profile_avatar.jpg")
+            val avatarSource = when {
+                !savedProfileUri.isNullOrBlank() -> savedProfileUri
+                fallbackAvatarFile.exists() && fallbackAvatarFile.length() > 0L -> fallbackAvatarFile.absolutePath
+                else -> null
+            }
+            val profileImageBase64 = ImageUtils.encodeImageToBase64(context, avatarSource, maxDimension = 1024, quality = 85)
+
+            val userProfileObj = JSONObject().apply {
+                put("name", profileName)
+                put("businessName", profileBusiness)
+                put("phone", profilePhone)
+                put("email", profileEmail)
+                if (!profileImageBase64.isNullOrBlank()) {
+                    put("profileImageBase64", profileImageBase64)
+                }
+            }
 
             val rootObj = JSONObject()
             val custArray = JSONArray()
@@ -699,6 +858,11 @@ object BackupManager {
                     put("collectToday", c.collectToday)
                     put("collectDueDate", c.collectDueDate ?: 0L)
                     put("lastUpdatedTimestamp", c.lastUpdatedTimestamp)
+                    val photoArray = multiPathToBase64Array(context, c.profilePhotoUri)
+                    if (photoArray.length() > 0) {
+                        put("profilePhotoBase64List", photoArray)
+                        put("profilePhotoBase64", photoArray.optString(0, ""))
+                    }
                 }
                 custArray.put(obj)
             }
@@ -714,6 +878,11 @@ object BackupManager {
                     put("category", t.category)
                     put("paymentMode", t.paymentMode)
                     put("attachmentPath", t.attachmentPath ?: "")
+                    val attachArray = multiPathToBase64Array(context, t.attachmentPath)
+                    if (attachArray.length() > 0) {
+                        put("attachmentBase64List", attachArray)
+                        put("attachmentBase64", attachArray.optString(0, ""))
+                    }
                 }
                 txArray.put(obj)
             }
@@ -728,27 +897,44 @@ object BackupManager {
                     put("dateTimestamp", exp.dateTimestamp)
                     put("notes", exp.notes)
                     put("attachmentPath", exp.attachmentPath ?: "")
+                    val attachArray = multiPathToBase64Array(context, exp.attachmentPath)
+                    if (attachArray.length() > 0) {
+                        put("attachmentBase64List", attachArray)
+                        put("attachmentBase64", attachArray.optString(0, ""))
+                    }
                 }
                 expArray.put(obj)
             }
 
             rootObj.put("version", 2)
+            rootObj.put("exportedAt", System.currentTimeMillis())
+            rootObj.put("userProfile", userProfileObj)
             rootObj.put("customers", custArray)
             rootObj.put("transactions", txArray)
             rootObj.put("monthlyExpenses", expArray)
 
-            rootObj.toString(2)
+            BackupExportPackage(
+                jsonString = rootObj.toString(2),
+                customerCount = customers.size,
+                transactionCount = transactions.size,
+                hasUserProfile = true
+            )
         } catch (e: Exception) {
-            Log.e(TAG, "Error exporting database to JSON: ${e.message}", e)
-            ""
+            Log.e(TAG, "Error exporting full backup package to JSON: ${e.message}", e)
+            BackupExportPackage(jsonString = "", customerCount = 0, transactionCount = 0, hasUserProfile = false)
         }
     }
+
+    /**
+     * Exports full database directly to JSON (delegates to unified exportFullBackupPackage).
+     */
+    suspend fun exportDatabaseToJson(context: Context): String = exportFullBackupPackage(context).jsonString
 
     /**
      * Executes automated backup when the app is closed / backgrounded, ONLY IF changes occurred.
      */
     fun performAutoBackupOnAppClose(context: Context) {
-        if (!hasUnbackedChanges(context) && !hasPendingDriveBackup(context)) {
+        if (!hasUnbackedChanges(context) && !hasPendingDriveBackup(context) && !AppPreferencesManager.hasPendingFirebaseBackup(context)) {
             Log.d(TAG, "Auto-backup skipped on close: No pending data changes or offline queue.")
             return
         }
@@ -794,7 +980,8 @@ object BackupManager {
      * Core Requirements Handled:
      * 1. Dedicated Folder: Stored inside "DailyExpenseBackups".
      * 2. Same-Day Overwrite: Overwrites today's existing backup file in the Drive folder instead of creating duplicate files.
-     * 3. 3-Day Rotation: Enforces a strict 3-day retention window, purging files older than the 3 newest daily backups.
+     * 3. Verified Upload Before 7-Day Rotation: Only purges backups older than the newest 7 snapshots after confirming
+     *    the new/overwritten snapshot exists and is non-empty.
      */
     fun performDriveAutoBackup(context: Context, jsonString: String): Boolean {
         if (jsonString.isBlank()) return false
@@ -819,15 +1006,12 @@ object BackupManager {
             val todayIso = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date())
             val targetFileName = "backup_$todayIso.json"
 
-            // 3-Day Rotation: Clean up older backups outside 3-day window before and after upload
-            enforceDrive3DayRotation(folder, targetFileName)
-
             // Same-Day Overwrite: Check for existing backup for today to overwrite, rather than creating duplicates
             val existingTodayFile = folder.listFiles().firstOrNull {
                 it.isFile && it.name == targetFileName
             }
 
-            val targetDocFile = if (existingTodayFile != null) {
+            var targetDocFile: DocumentFile? = if (existingTodayFile != null) {
                 Log.d(TAG, "Found existing backup for today in DailyExpenseBackups: $targetFileName. Overwriting in-place...")
                 existingTodayFile
             } else {
@@ -840,25 +1024,39 @@ object BackupManager {
                 return false
             }
 
-            // Write JSON payload into the target file (in truncate/overwrite mode)
+            val payloadBytes = jsonString.toByteArray(Charsets.UTF_8)
+            var writeStreamOpened = false
             context.contentResolver.openOutputStream(targetDocFile.uri, "wt")?.use { os ->
-                os.write(jsonString.toByteArray(Charsets.UTF_8))
+                os.write(payloadBytes)
                 os.flush()
-            } ?: run {
-                // Fallback for providers that don't support "wt"
+                writeStreamOpened = true
+            }
+            if (!writeStreamOpened) {
                 Log.w(TAG, "Stream write failed, attempting recreate fallback...")
                 targetDocFile.delete()
                 val fallbackFile = folder.createFile("application/json", targetFileName) ?: return false
+                targetDocFile = fallbackFile
                 context.contentResolver.openOutputStream(fallbackFile.uri, "w")?.use { os ->
-                    os.write(jsonString.toByteArray(Charsets.UTF_8))
+                    os.write(payloadBytes)
                     os.flush()
+                    writeStreamOpened = true
                 } ?: return false
             }
 
-            Log.d(TAG, "Successfully backed up to DailyExpenseBackups folder: $targetFileName")
+            // Verify target exists and is non-empty BEFORE pruning older backups
+            val verifiedNonEmpty = targetDocFile.exists() && (
+                targetDocFile.length() > 0L ||
+                    (context.contentResolver.openInputStream(targetDocFile.uri)?.use { it.read() != -1 } == true)
+            )
+            if (!verifiedNonEmpty) {
+                Log.e(TAG, "Drive backup write could not be verified non-empty; keeping existing snapshots intact.")
+                return false
+            }
 
-            // Re-enforce 3-day rotation to guarantee folder maintains strictly at most 3 daily backup files
-            enforceDrive3DayRotation(folder, targetFileName)
+            Log.d(TAG, "Successfully verified upload in DailyExpenseBackups folder: $targetFileName")
+
+            // Enforce 7-day retention ONLY AFTER upload & verification succeed
+            enforceDriveSevenDayRotation(folder, targetFileName)
 
             val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             prefs.edit()
@@ -873,31 +1071,44 @@ object BackupManager {
     }
 
     /**
-     * 3-Day Rotation in Google Drive Folder:
-     * Retains only the 3 most recent daily backup files in "DailyExpenseBackups" and removes older backups.
+     * 7-Day Rotation in Google Drive Folder:
+     * Retains the 7 most recent daily backup files in "DailyExpenseBackups" and removes older backups.
      */
-    fun enforceDrive3DayRotation(folder: DocumentFile, currentFileName: String? = null) {
+    fun enforceDriveSevenDayRotation(folder: DocumentFile, currentFileName: String? = null) {
         try {
             val allBackupFiles = folder.listFiles().filter {
                 it.isFile && (it.name?.startsWith("backup_") == true || it.name?.endsWith(".json") == true)
             }
 
-            // Group by unique filename sorted descending by last modified
-            val sortedFilesNewestFirst = allBackupFiles.sortedByDescending { it.lastModified() }
+            // Sort newest-first by date extracted from backup_YYYY-MM-DD.json (fallback lastModified)
+            val sortedFilesNewestFirst = allBackupFiles.sortedWith(
+                compareByDescending<DocumentFile> { doc ->
+                    val name = doc.name.orEmpty()
+                    if (name.startsWith("backup_") && name.endsWith(".json")) {
+                        name.removePrefix("backup_").removeSuffix(".json")
+                    } else {
+                        String.format(Locale.US, "%020d", doc.lastModified())
+                    }
+                }.thenByDescending { it.lastModified() }
+            )
 
             if (sortedFilesNewestFirst.size > MAX_DRIVE_BACKUP_DAYS) {
                 val filesToDelete = sortedFilesNewestFirst.drop(MAX_DRIVE_BACKUP_DAYS)
                 filesToDelete.forEach { oldFile ->
-                    // Do not delete today's active target if currently processing
                     if (oldFile.name != currentFileName) {
                         val deleted = oldFile.delete()
-                        Log.d(TAG, "3-Day Drive Retention: Deleted old backup file ${oldFile.name}, success=$deleted")
+                        Log.d(TAG, "7-Day Drive Retention: Deleted old backup file ${oldFile.name}, success=$deleted")
                     }
                 }
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Error enforcing 3-Day Drive backup rotation: ${e.message}")
+            Log.e(TAG, "Error enforcing 7-Day Drive backup rotation: ${e.message}")
         }
+    }
+
+    @Deprecated("Use enforceDriveSevenDayRotation", ReplaceWith("enforceDriveSevenDayRotation(folder, currentFileName)"))
+    fun enforceDrive3DayRotation(folder: DocumentFile, currentFileName: String? = null) {
+        enforceDriveSevenDayRotation(folder, currentFileName)
     }
 
     private fun cleanOldLocalBackups(dir: File) {
