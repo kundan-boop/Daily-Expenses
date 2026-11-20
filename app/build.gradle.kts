@@ -18,8 +18,8 @@ android {
     applicationId = "com.aistudio.dailyexpense.ledger"
     minSdk = 24
     targetSdk = 36
-    versionCode = 6
-    versionName = "1.5"
+    versionCode = 7
+    versionName = "1.6"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
@@ -160,3 +160,7 @@ dependencies {
   "ksp"(libs.androidx.room.compiler)
   // "ksp"(libs.moshi.kotlin.codegen)
 }
+
+// Do not change applicationId or signing config
+apply(from = "signing.gradle")
+

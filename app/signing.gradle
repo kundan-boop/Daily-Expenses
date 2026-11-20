@@ -1,0 +1,39 @@
+// Do not change applicationId or signing config
+// Separate Gradle script so AI Studio re-exports do not overwrite CI signing and monotonic versionCode wiring.
+
+project.android {
+    def ciVersionCodeStr = System.getenv("VERSION_CODE")
+    if (ciVersionCodeStr != null && ciVersionCodeStr.trim().isInteger()) {
+        def ciVersionCode = ciVersionCodeStr.trim().toInteger()
+        def currentCode = defaultConfig.versionCode ?: 0
+        if (ciVersionCode > currentCode) {
+            defaultConfig.versionCode = ciVersionCode
+        }
+    }
+
+    def ciVersionName = System.getenv("VERSION_NAME")?.trim()
+    if (ciVersionName) {
+        defaultConfig.versionName = ciVersionName
+    }
+
+    def ciKeystorePath = System.getenv("CI_KEYSTORE_PATH")?.trim()
+    def ciKeystorePassword = System.getenv("KEYSTORE_PASSWORD")
+    def ciKeyAlias = System.getenv("KEY_ALIAS")?.trim()
+    def ciKeyPassword = System.getenv("KEY_PASSWORD")
+
+    if (ciKeystorePath &&
+        project.file(ciKeystorePath).exists() &&
+        ciKeystorePassword &&
+        ciKeyAlias &&
+        ciKeyPassword
+    ) {
+        def ciReleaseSigning = signingConfigs.maybeCreate("ciPermanent")
+        ciReleaseSigning.storeFile = project.file(ciKeystorePath)
+        ciReleaseSigning.storePassword = ciKeystorePassword
+        ciReleaseSigning.keyAlias = ciKeyAlias
+        ciReleaseSigning.keyPassword = ciKeyPassword
+
+        buildTypes.getByName("debug").signingConfig = ciReleaseSigning
+        buildTypes.getByName("release").signingConfig = ciReleaseSigning
+    }
+}

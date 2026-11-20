@@ -29,6 +29,9 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun categoryDao(): CategoryDao
 
     companion object {
+        const val DATABASE_NAME = "daily_expense_db"
+        const val DATABASE_VERSION = 7
+
         @Volatile
         private var INSTANCE: AppDatabase? = null
 
@@ -160,7 +163,7 @@ abstract class AppDatabase : RoomDatabase() {
                 val instance = Room.databaseBuilder(
                     context.applicationContext,
                     AppDatabase::class.java,
-                    "daily_expense_db"
+                    DATABASE_NAME
                 )
                 .setJournalMode(JournalMode.WRITE_AHEAD_LOGGING)
                 .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7)
@@ -168,6 +171,21 @@ abstract class AppDatabase : RoomDatabase() {
                 .build()
                 INSTANCE = instance
                 instance
+            }
+        }
+
+        internal fun isInstanceOpen(): Boolean = INSTANCE != null
+
+        internal fun resetInstanceForRecovery() {
+            synchronized(this) {
+                try {
+                    if (INSTANCE?.isOpen == true) {
+                        INSTANCE?.close()
+                    }
+                } catch (_: Exception) {
+                } finally {
+                    INSTANCE = null
+                }
             }
         }
 

@@ -6,6 +6,11 @@ on:
   pull_request:
     branches: [ "main", "master" ]
   workflow_dispatch:
+    inputs:
+      version_name:
+        description: 'Readable versionName (e.g., 1.6)'
+        required: false
+        default: '1.6'
 
 jobs:
   build:
@@ -14,6 +19,77 @@ jobs:
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
+
+      - name: Verify Package Identity (applicationId)
+        shell: bash
+        run: |
+          set -euo pipefail
+          EXPECTED_APP_ID="com.aistudio.dailyexpense.ledger"
+          if ! grep -q "applicationId = \"${EXPECTED_APP_ID}\"" app/build.gradle.kts; then
+            echo "::error::applicationId must be ${EXPECTED_APP_ID} in app/build.gradle.kts!"
+            exit 1
+          fi
+          if grep -q "applicationIdSuffix" app/build.gradle.kts; then
+            echo "::error::applicationIdSuffix is not allowed in app/build.gradle.kts!"
+            exit 1
+          fi
+          if grep -q "productFlavors" app/build.gradle.kts; then
+            echo "::error::productFlavors are not allowed in app/build.gradle.kts!"
+            exit 1
+          fi
+          echo "Verified fixed applicationId=${EXPECTED_APP_ID} (no suffix, no flavors)."
+
+      - name: Verify Signing Secrets
+        shell: bash
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          missing=0
+          for var in KEYSTORE_BASE64 KEYSTORE_PASSWORD KEY_ALIAS KEY_PASSWORD; do
+            if [ -z "${!var:-}" ]; then
+              echo "::error::Missing required GitHub Actions secret: ${var}. Configure it under Settings -> Secrets and variables -> Actions."
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            exit 1
+          fi
+          echo "All required signing secrets are configured."
+
+      - name: Decode Permanent Keystore
+        shell: bash
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+        run: |
+          set -euo pipefail
+          KEYSTORE_FILE="${{ runner.temp }}/dailyexpense.jks"
+          printf '%s' "${KEYSTORE_BASE64}" | tr -d '\r\n ' | base64 --decode > "${KEYSTORE_FILE}"
+          if [ ! -s "${KEYSTORE_FILE}" ]; then
+            echo "::error::Decoded keystore file is empty."
+            exit 1
+          fi
+          keytool -list -keystore "${KEYSTORE_FILE}" -alias "${KEY_ALIAS}" -storepass "${KEYSTORE_PASSWORD}" >/dev/null
+          echo "CI_KEYSTORE_PATH=${KEYSTORE_FILE}" >> "${GITHUB_ENV}"
+          echo "Decoded and verified keystore alias cleanly."
+
+      - name: Compute Monotonic Version Code & Version Name
+        shell: bash
+        run: |
+          set -euo pipefail
+          EPOCH_MINUTES=$(( $(date +%s) / 60 ))
+          INPUT_VERSION_NAME="${{ github.event.inputs.version_name }}"
+          if [ -z "${INPUT_VERSION_NAME}" ]; then
+            INPUT_VERSION_NAME=$(grep -E '^\s*versionName\s*=' app/build.gradle.kts | head -n1 | sed -E 's/.*"([^"]+)".*/\1/' || echo "1.6")
+          fi
+          echo "VERSION_CODE=${EPOCH_MINUTES}" >> "${GITHUB_ENV}"
+          echo "VERSION_NAME=${INPUT_VERSION_NAME}" >> "${GITHUB_ENV}"
+          echo "Resolved VERSION_CODE=${EPOCH_MINUTES}, VERSION_NAME=${INPUT_VERSION_NAME}"
 
       - name: Set up JDK 21
         uses: actions/setup-java@v5
@@ -30,13 +106,54 @@ jobs:
       - name: Make gradlew executable
         run: chmod +x gradlew
 
-      - name: Build Debug APK
-        run: gradle assembleDebug --stacktrace
+      - name: Build Universal Release APK
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: ./gradlew assembleRelease --stacktrace
 
-      - name: Upload APK Artifact
+      - name: Verify & Print APK Package Metadata and Certificate SHA-256
+        shell: bash
+        run: |
+          set -euo pipefail
+          SRC_APK="app/build/outputs/apk/release/app-release.apk"
+          if [ ! -f "${SRC_APK}" ]; then
+            echo "::error::Built APK not found at ${SRC_APK}"
+            exit 1
+          fi
+
+          OUT_DIR="${{ runner.temp }}/apk-out"
+          mkdir -p "${OUT_DIR}"
+          OUT_APK="${OUT_DIR}/DailyExpense-v${VERSION_NAME}-${GITHUB_RUN_NUMBER}.apk"
+          cp "${SRC_APK}" "${OUT_APK}"
+
+          SDK_DIR="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}"
+          BUILD_TOOLS_DIR=$(ls -d "${SDK_DIR}"/build-tools/* 2>/dev/null | sort -V | tail -n 1)
+          APKSIGNER="${BUILD_TOOLS_DIR}/apksigner"
+          AAPT2="${BUILD_TOOLS_DIR}/aapt2"
+
+          echo "=== APK Package Metadata ==="
+          if [ -x "${AAPT2}" ]; then
+            BADGING=$("${AAPT2}" dump badging "${OUT_APK}" | head -n 5)
+            echo "${BADGING}"
+            if ! echo "${BADGING}" | grep -q "name='com.aistudio.dailyexpense.ledger'"; then
+              echo "::error::Built APK package name does not match com.aistudio.dailyexpense.ledger!"
+              exit 1
+            fi
+          fi
+
+          echo "=== APK Signing Certificate Fingerprint ==="
+          "${APKSIGNER}" verify --verbose --print-certs "${OUT_APK}"
+
+      - name: Cleanup Decoded Keystore
+        if: always()
+        shell: bash
+        run: rm -f "${{ runner.temp }}/dailyexpense.jks"
+
+      - name: Upload Universal APK Artifact
         uses: actions/upload-artifact@v4
-        continue-on-error: true
         with:
-          name: DailyExpenses-Debug-APK
-          path: app/build/outputs/apk/debug/app-debug.apk
-          retention-days: 1
+          name: DailyExpense-v${{ env.VERSION_NAME }}-${{ github.run_number }}
+          path: ${{ runner.temp }}/apk-out/DailyExpense-*.apk
+          retention-days: 14

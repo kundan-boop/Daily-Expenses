@@ -2006,6 +2006,12 @@ class DailyExpenseViewModel(application: Application) : AndroidViewModel(applica
         return performFullBackupImportInternal(jsonString, authViewModel = null).success
     }
 
+    private fun optStringSafe(obj: org.json.JSONObject, key: String, fallback: String = ""): String {
+        if (!obj.has(key) || obj.isNull(key)) return fallback
+        val value = obj.optString(key, fallback)
+        return if (value.equals("null", ignoreCase = true)) fallback else value
+    }
+
     internal suspend fun performFullBackupImportInternal(
         jsonString: String,
         authViewModel: AuthViewModel?
@@ -2024,7 +2030,7 @@ class DailyExpenseViewModel(application: Application) : AndroidViewModel(applica
 
             val existingTxKeySet = mutableSetOf<String>()
             existingTxs.forEach { tx ->
-                val key = "${tx.customerId}_${tx.transactionType}_${(tx.amount * 100).toLong()}_${tx.comment.trim()}"
+                val key = "${tx.customerId}_${tx.transactionType}_${(tx.amount * 100).toLong()}_${tx.dateTimestamp}_${tx.comment.trim()}"
                 existingTxKeySet.add(key)
             }
 
@@ -2032,15 +2038,18 @@ class DailyExpenseViewModel(application: Application) : AndroidViewModel(applica
             for (i in 0 until custArray.length()) {
                 val obj = custArray.getJSONObject(i)
                 val oldId = obj.optLong("id", 0L)
-                val nameVal = obj.getString("name").trim()
-                val mobileVal = obj.optString("mobileNumber", "").trim()
-                val dueDateVal = obj.optLong("collectDueDate", 0L)
+                val nameVal = optStringSafe(obj, "name").trim()
+                if (nameVal.isBlank()) continue
+                val mobileVal = optStringSafe(obj, "mobileNumber").trim()
+                val dueDateVal = if (!obj.isNull("collectDueDate")) obj.optLong("collectDueDate", 0L) else 0L
 
                 val restoredPhotoUri = when {
-                    obj.has("profilePhotoBase64List") -> restoreBase64JsonArrayToLocalPaths(context, obj.getJSONArray("profilePhotoBase64List"), "profile_photos")
-                    obj.has("profilePhotoBase64") && obj.getString("profilePhotoBase64").isNotBlank() -> saveBase64ToLocalFile(obj.getString("profilePhotoBase64"), "profile_photos")
+                    obj.has("profilePhotoBase64List") && !obj.isNull("profilePhotoBase64List") ->
+                        restoreBase64JsonArrayToLocalPaths(context, obj.getJSONArray("profilePhotoBase64List"), "profile_photos")
+                    obj.has("profilePhotoBase64") && optStringSafe(obj, "profilePhotoBase64").isNotBlank() ->
+                        saveBase64ToLocalFile(optStringSafe(obj, "profilePhotoBase64"), "profile_photos")
                     else -> {
-                        val rawUri = obj.optString("profilePhotoUri", "").trim()
+                        val rawUri = optStringSafe(obj, "profilePhotoUri").trim()
                         if (rawUri.isNotBlank() && java.io.File(rawUri).exists()) rawUri else null
                     }
                 }
@@ -2061,9 +2070,9 @@ class DailyExpenseViewModel(application: Application) : AndroidViewModel(applica
                         CustomerEntity(
                             name = nameVal,
                             mobileNumber = mobileVal,
-                            address = obj.optString("address", ""),
-                            email = obj.optString("email", ""),
-                            notes = obj.optString("notes", ""),
+                            address = optStringSafe(obj, "address"),
+                            email = optStringSafe(obj, "email"),
+                            notes = optStringSafe(obj, "notes"),
                             profilePhotoUri = restoredPhotoUri,
                             collectToday = obj.optBoolean("collectToday", false),
                             collectDueDate = if (dueDateVal > 0) dueDateVal else null,
@@ -2081,26 +2090,29 @@ class DailyExpenseViewModel(application: Application) : AndroidViewModel(applica
 
             for (i in 0 until txArray.length()) {
                 val obj = txArray.getJSONObject(i)
-                val oldCustId = obj.getLong("customerId")
+                val oldCustId = obj.optLong("customerId", 0L)
                 val targetCustId = idMap[oldCustId] ?: oldCustId
+                if (targetCustId <= 0L) continue
 
-                val txType = obj.getString("transactionType")
-                val txAmount = obj.getDouble("amount")
+                val txType = optStringSafe(obj, "transactionType", "I_PAID")
+                val txAmount = obj.optDouble("amount", 0.0)
                 val txDate = obj.optLong("dateTimestamp", System.currentTimeMillis())
-                val txComment = obj.optString("comment", "").trim()
-                val txCategory = obj.optString("category", "General")
-                val txPaymentMode = obj.optString("paymentMode", "CASH")
+                val txComment = optStringSafe(obj, "comment").trim()
+                val txCategory = optStringSafe(obj, "category", "General").ifBlank { "General" }
+                val txPaymentMode = optStringSafe(obj, "paymentMode", "CASH").ifBlank { "CASH" }
 
                 val restoredAttachPath = when {
-                    obj.has("attachmentBase64List") -> restoreBase64JsonArrayToLocalPaths(context, obj.getJSONArray("attachmentBase64List"), "attachments")
-                    obj.has("attachmentBase64") && obj.getString("attachmentBase64").isNotBlank() -> saveBase64ToLocalFile(obj.getString("attachmentBase64"), "attachments")
+                    obj.has("attachmentBase64List") && !obj.isNull("attachmentBase64List") ->
+                        restoreBase64JsonArrayToLocalPaths(context, obj.getJSONArray("attachmentBase64List"), "attachments")
+                    obj.has("attachmentBase64") && optStringSafe(obj, "attachmentBase64").isNotBlank() ->
+                        saveBase64ToLocalFile(optStringSafe(obj, "attachmentBase64"), "attachments")
                     else -> {
-                        val rawPath = obj.optString("attachmentPath", "").trim()
+                        val rawPath = optStringSafe(obj, "attachmentPath").trim()
                         if (rawPath.isNotBlank() && java.io.File(rawPath).exists()) rawPath else null
                     }
                 }
 
-                val txKey = "${targetCustId}_${txType}_${(txAmount * 100).toLong()}_${txComment}"
+                val txKey = "${targetCustId}_${txType}_${(txAmount * 100).toLong()}_${txDate}_${txComment}"
 
                 if (!existingTxKeySet.contains(txKey)) {
                     existingTxKeySet.add(txKey)
@@ -2125,25 +2137,27 @@ class DailyExpenseViewModel(application: Application) : AndroidViewModel(applica
 
             // Restore Monthly Expenses if present in JSON
             var expensesAdded = 0
-            if (rootObj.has("monthlyExpenses")) {
+            if (rootObj.has("monthlyExpenses") && !rootObj.isNull("monthlyExpenses")) {
                 val expArray = rootObj.getJSONArray("monthlyExpenses")
                 val existingExpenses = repository.allExpenses.firstOrNull() ?: emptyList()
                 val existingExpKeySet = existingExpenses.map { "${it.monthYear}_${it.title.trim()}_${(it.amount * 100).toLong()}" }.toSet()
 
                 for (i in 0 until expArray.length()) {
                     val obj = expArray.getJSONObject(i)
-                    val monthYear = obj.optString("monthYear", "")
-                    val title = obj.optString("title", "").trim()
-                    val category = obj.optString("category", "General")
+                    val monthYear = optStringSafe(obj, "monthYear")
+                    val title = optStringSafe(obj, "title").trim()
+                    val category = optStringSafe(obj, "category", "General").ifBlank { "General" }
                     val amount = obj.optDouble("amount", 0.0)
                     val dateTimestamp = obj.optLong("dateTimestamp", System.currentTimeMillis())
-                    val notes = obj.optString("notes", "")
+                    val notes = optStringSafe(obj, "notes")
 
                     val restoredAttachPath = when {
-                        obj.has("attachmentBase64List") -> restoreBase64JsonArrayToLocalPaths(context, obj.getJSONArray("attachmentBase64List"), "attachments")
-                        obj.has("attachmentBase64") && obj.getString("attachmentBase64").isNotBlank() -> saveBase64ToLocalFile(obj.getString("attachmentBase64"), "attachments")
+                        obj.has("attachmentBase64List") && !obj.isNull("attachmentBase64List") ->
+                            restoreBase64JsonArrayToLocalPaths(context, obj.getJSONArray("attachmentBase64List"), "attachments")
+                        obj.has("attachmentBase64") && optStringSafe(obj, "attachmentBase64").isNotBlank() ->
+                            saveBase64ToLocalFile(optStringSafe(obj, "attachmentBase64"), "attachments")
                         else -> {
-                            val rawPath = obj.optString("attachmentPath", "").trim()
+                            val rawPath = optStringSafe(obj, "attachmentPath").trim()
                             if (rawPath.isNotBlank() && java.io.File(rawPath).exists()) rawPath else null
                         }
                     }
@@ -2171,11 +2185,11 @@ class DailyExpenseViewModel(application: Application) : AndroidViewModel(applica
             val profileObj = rootObj.optJSONObject("userProfile")
             if (profileObj != null) {
                 hasProfile = true
-                val bName = profileObj.optString("name", "")
-                val bBusiness = profileObj.optString("businessName", "")
-                val bPhone = profileObj.optString("phone", "")
-                val bEmail = profileObj.optString("email", "")
-                val bImgBase64 = profileObj.optString("profileImageBase64", "").ifBlank { null }
+                val bName = optStringSafe(profileObj, "name")
+                val bBusiness = optStringSafe(profileObj, "businessName")
+                val bPhone = optStringSafe(profileObj, "phone")
+                val bEmail = optStringSafe(profileObj, "email")
+                val bImgBase64 = optStringSafe(profileObj, "profileImageBase64").ifBlank { null }
 
                 if (authViewModel != null) {
                     val current = authViewModel.userProfile.value

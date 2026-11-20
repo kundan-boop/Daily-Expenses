@@ -9,12 +9,20 @@ import android.graphics.Color
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.example.data.AppDatabase
+import com.example.data.CustomerEntity
+import com.example.data.DatabaseSafetyManager
+import com.example.data.DbStartupState
+import com.example.data.TransactionEntity
+import com.example.ui.AuthViewModel
+import com.example.ui.DailyExpenseViewModel
 import com.example.utils.AppPreferencesManager
 import com.example.utils.ImageUtils
 import com.example.utils.ThemeMode
 import com.example.utils.stringsForLanguage
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
+import org.json.JSONArray
+import org.json.JSONObject
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -309,5 +317,220 @@ class UpgradeSafetyAndFeaturesTest {
 
         // Fallback to English on unknown language string
         assertEquals(en, stringsForLanguage("Unknown"))
+    }
+
+    @Test
+    fun preMigrationSafetyCopy_capturedBeforeMigration_keptUntilNextSuccessfulLaunch() {
+        val app: Application = ApplicationProvider.getApplicationContext()
+        AppDatabase.resetInstanceForRecovery()
+        DatabaseSafetyManager.resetForTesting()
+        app.getSharedPreferences("db_safety_prefs", Context.MODE_PRIVATE).edit().clear().commit()
+        File(app.filesDir, "db_migration_safety").deleteRecursively()
+        app.deleteDatabase(AppDatabase.DATABASE_NAME)
+
+        val dbFile = app.getDatabasePath(AppDatabase.DATABASE_NAME)
+        dbFile.parentFile?.mkdirs()
+
+        // Create pre-update v5 database with real customer row
+        val sqlite = SQLiteDatabase.openOrCreateDatabase(dbFile, null)
+        try {
+            sqlite.execSQL("CREATE TABLE IF NOT EXISTS `customers` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `name` TEXT NOT NULL)")
+            sqlite.execSQL("INSERT INTO `customers` (`id`, `name`) VALUES (1, 'Pre-Update Customer')")
+            sqlite.version = 5
+        } finally {
+            sqlite.close()
+        }
+
+        // First launch on new versionCode = 100 -> safety copy must be created BEFORE opener runs and KEPT after first launch
+        val stateLaunch1 = DatabaseSafetyManager.prepareAndVerifySync(
+            context = app,
+            currentVersionCodeOverride = 100L,
+            dbVersionOpener = { ctx ->
+                val migrated = SQLiteDatabase.openDatabase(
+                    ctx.getDatabasePath(AppDatabase.DATABASE_NAME).absolutePath,
+                    null,
+                    SQLiteDatabase.OPEN_READWRITE
+                )
+                migrated.use { s ->
+                    assertEquals(5, s.version)
+                    s.version = AppDatabase.DATABASE_VERSION
+                    s.version
+                }
+            }
+        )
+        assertTrue(stateLaunch1 is DbStartupState.Ready)
+        assertTrue((stateLaunch1 as DbStartupState.Ready).hasPreservedSafetyCopy)
+        assertTrue(DatabaseSafetyManager.hasValidSafetyCopy(app))
+
+        // Next launch on same versionCode = 100 -> safety copy is retired cleanly after next successful launch
+        DatabaseSafetyManager.resetForTesting()
+        val stateLaunch2 = DatabaseSafetyManager.prepareAndVerifySync(
+            context = app,
+            currentVersionCodeOverride = 100L,
+            dbVersionOpener = { AppDatabase.DATABASE_VERSION }
+        )
+        assertTrue(stateLaunch2 is DbStartupState.Ready)
+        assertFalse((stateLaunch2 as DbStartupState.Ready).hasPreservedSafetyCopy)
+        assertFalse(DatabaseSafetyManager.hasValidSafetyCopy(app))
+
+        app.deleteDatabase(AppDatabase.DATABASE_NAME)
+    }
+
+    @Test
+    fun migrationFailure_doesNotWipeData_andRestoresFromSafetyCopy() {
+        val app: Application = ApplicationProvider.getApplicationContext()
+        AppDatabase.resetInstanceForRecovery()
+        DatabaseSafetyManager.resetForTesting()
+        app.getSharedPreferences("db_safety_prefs", Context.MODE_PRIVATE).edit().clear().commit()
+        File(app.filesDir, "db_migration_safety").deleteRecursively()
+        app.deleteDatabase(AppDatabase.DATABASE_NAME)
+
+        val dbFile = app.getDatabasePath(AppDatabase.DATABASE_NAME)
+        dbFile.parentFile?.mkdirs()
+        val sqlite = SQLiteDatabase.openOrCreateDatabase(dbFile, null)
+        try {
+            sqlite.execSQL("CREATE TABLE IF NOT EXISTS `customers` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `name` TEXT NOT NULL)")
+            sqlite.execSQL("INSERT INTO `customers` (`id`, `name`) VALUES (42, 'Protected Owner Customer')")
+            sqlite.version = 5
+        } finally {
+            sqlite.close()
+        }
+
+        // Launch 1 fails during migration -> DB file stays intact & MigrationFailed exposes safety copy
+        val failedState = DatabaseSafetyManager.prepareAndVerifySync(
+            context = app,
+            currentVersionCodeOverride = 101L,
+            dbVersionOpener = {
+                // Simulate failed migration writing corrupted/partial marker
+                throw IllegalStateException("Simulated migration failure")
+            }
+        )
+        assertTrue(failedState is DbStartupState.MigrationFailed)
+        val failure = failedState as DbStartupState.MigrationFailed
+        assertTrue(failure.hasSafetyCopy)
+        assertTrue(failure.errorMessage.contains("Simulated migration failure"))
+        assertTrue("Database file must never be deleted on failure", dbFile.exists() && dbFile.length() > 0L)
+
+        // Restore from safety copy restores the DB and succeeds when opener succeeds
+        val restored = DatabaseSafetyManager.restoreFromSafetyCopy(
+            context = app,
+            currentVersionCodeOverride = 101L,
+            dbVersionOpener = { ctx ->
+                val db = SQLiteDatabase.openDatabase(ctx.getDatabasePath(AppDatabase.DATABASE_NAME).absolutePath, null, SQLiteDatabase.OPEN_READONLY)
+                db.use { s ->
+                    s.rawQuery("SELECT name FROM customers WHERE id = 42", null).use { c ->
+                        assertTrue(c.moveToFirst())
+                        assertEquals("Protected Owner Customer", c.getString(0))
+                    }
+                    s.version
+                }
+            }
+        )
+        assertTrue(restored.isSuccess)
+        assertTrue(DatabaseSafetyManager.startupState.value is DbStartupState.Ready)
+
+        app.deleteDatabase(AppDatabase.DATABASE_NAME)
+        File(app.filesDir, "db_migration_safety").deleteRecursively()
+    }
+
+    @Test
+    fun restoreFullBackup_acceptsVersion12BackupWithoutProfileAndPreservesExistingData() = runBlocking {
+        val app: Application = ApplicationProvider.getApplicationContext()
+        AppDatabase.resetInstanceForRecovery()
+        val db = AppDatabase.getDatabase(app)
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            db.clearAllTables()
+        }
+
+        app.getSharedPreferences("user_prefs", Context.MODE_PRIVATE).edit()
+            .putString("user_name", "Phone Owner")
+            .putString("business_name", "Phone Mart")
+            .commit()
+
+        val existingCid = db.customerDao().insertCustomer(
+            CustomerEntity(name = "Existing Local Customer", mobileNumber = "9111100000")
+        )
+        db.transactionDao().insertTransaction(
+            TransactionEntity(
+                customerId = existingCid,
+                transactionType = "I_PAID",
+                amount = 750.0,
+                comment = "Already On Phone"
+            )
+        )
+
+        val authVm = AuthViewModel(app)
+        val ledgerVm = DailyExpenseViewModel(app)
+
+        // Simulate v1.2 legacy backup: no userProfile, no monthlyExpenses, JSON nulls, two identical-amount entries on different dates
+        val v12Json = JSONObject().apply {
+            put("version", 1)
+            put("customers", JSONArray().apply {
+                put(JSONObject().apply {
+                    put("id", 7L)
+                    put("name", "Legacy v1.2 Customer")
+                    put("mobileNumber", "9888877777")
+                    put("address", JSONObject.NULL)
+                    put("email", JSONObject.NULL)
+                    put("notes", JSONObject.NULL)
+                    put("profilePhotoUri", JSONObject.NULL)
+                    put("collectToday", false)
+                    put("collectDueDate", JSONObject.NULL)
+                })
+            })
+            put("transactions", JSONArray().apply {
+                put(JSONObject().apply {
+                    put("customerId", 7L)
+                    put("transactionType", "I_PAID")
+                    put("amount", 500.0)
+                    put("dateTimestamp", 1_700_000_000_000L)
+                    put("comment", "")
+                    put("category", JSONObject.NULL)
+                    put("paymentMode", JSONObject.NULL)
+                    put("attachmentPath", JSONObject.NULL)
+                })
+                put(JSONObject().apply {
+                    put("customerId", 7L)
+                    put("transactionType", "I_PAID")
+                    put("amount", 500.0)
+                    put("dateTimestamp", 1_700_086_400_000L)
+                    put("comment", "")
+                })
+            })
+        }.toString()
+
+        val summary = ledgerVm.performFullBackupImportInternal(v12Json, authVm)
+        assertTrue(summary.success)
+        assertEquals(1, summary.customersAdded)
+        assertEquals(2, summary.transactionsAdded)
+        assertFalse(summary.hasProfileInBackup)
+        assertEquals("Phone Owner", authVm.userProfile.value.name)
+
+        val allCustomers = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            db.customerDao().getAllCustomersDirect()
+        }
+        assertEquals(2, allCustomers.size)
+        val restoredCust = allCustomers.first { it.name == "Legacy v1.2 Customer" }
+        assertEquals("", restoredCust.address)
+        assertEquals("", restoredCust.notes)
+
+        val restoredTxs = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            db.transactionDao().getTransactionsForCustomerDirect(restoredCust.id)
+        }
+        assertEquals(2, restoredTxs.size)
+        assertEquals("General", restoredTxs.first().category)
+        assertEquals("CASH", restoredTxs.first().paymentMode)
+
+        // Pre-existing customer & transaction stayed untouched
+        val existingTxs = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            db.transactionDao().getTransactionsForCustomerDirect(existingCid)
+        }
+        assertEquals(1, existingTxs.size)
+        assertEquals("Already On Phone", existingTxs.first().comment)
+
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            db.clearAllTables()
+        }
+        AppDatabase.resetInstanceForRecovery()
     }
 }

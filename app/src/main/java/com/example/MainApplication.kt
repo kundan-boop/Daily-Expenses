@@ -6,6 +6,11 @@ import coil.ImageLoaderFactory
 import coil.disk.DiskCache
 import coil.memory.MemoryCache
 import com.example.data.DatabaseManager
+import com.example.data.DatabaseSafetyManager
+import com.example.data.DbStartupState
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 
 class MainApplication : Application(), ImageLoaderFactory {
 
@@ -16,7 +21,16 @@ class MainApplication : Application(), ImageLoaderFactory {
         } catch (e: Exception) {
             // Ignored if already initialized or not needed
         }
-        DatabaseManager.schedulePeriodicOptimization(this)
+
+        // Capture pre-migration database safety copy BEFORE any coroutine or UI opens Room
+        DatabaseSafetyManager.prepareBeforeDatabaseOpen(this)
+        CoroutineScope(Dispatchers.IO).launch {
+            val state = DatabaseSafetyManager.prepareAndVerifySync(this@MainApplication)
+            if (state is DbStartupState.Ready) {
+                DatabaseManager.optimizeDatabase(com.example.data.AppDatabase.getDatabase(this@MainApplication))
+            }
+        }
+
         com.example.utils.AppPreferencesManager.init(this)
         com.example.utils.BackupManager.init(this)
     }
