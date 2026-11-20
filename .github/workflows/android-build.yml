@@ -3,14 +3,15 @@ name: Build Android APK
 on:
   push:
     branches: [ "main", "master" ]
-  pull_request:
-    branches: [ "main", "master" ]
   workflow_dispatch:
     inputs:
       version_name:
         description: 'Readable versionName (e.g., 1.6)'
         required: false
         default: '1.6'
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -39,44 +40,80 @@ jobs:
           fi
           echo "Verified fixed applicationId=${EXPECTED_APP_ID} (no suffix, no flavors)."
 
-      - name: Verify Signing Secrets
-        shell: bash
-        env:
-          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
-          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
-          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
-        run: |
-          set -euo pipefail
-          missing=0
-          for var in KEYSTORE_BASE64 KEYSTORE_PASSWORD KEY_ALIAS KEY_PASSWORD; do
-            if [ -z "${!var:-}" ]; then
-              echo "::error::Missing required GitHub Actions secret: ${var}. Configure it under Settings -> Secrets and variables -> Actions."
-              missing=1
-            fi
-          done
-          if [ "$missing" -ne 0 ]; then
-            exit 1
-          fi
-          echo "All required signing secrets are configured."
+      - name: Set up JDK 21
+        uses: actions/setup-java@v5
+        with:
+          java-version: '21'
+          distribution: 'temurin'
 
-      - name: Decode Permanent Keystore
+      - name: Load or Create Permanent Keystore
         shell: bash
         env:
-          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
-          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          GH_TOKEN: ${{ github.token }}
+          SECRET_KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          SECRET_KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          SECRET_KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          SECRET_KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
           set -euo pipefail
-          KEYSTORE_FILE="${{ runner.temp }}/dailyexpense.jks"
-          printf '%s' "${KEYSTORE_BASE64}" | tr -d '\r\n ' | base64 --decode > "${KEYSTORE_FILE}"
-          if [ ! -s "${KEYSTORE_FILE}" ]; then
-            echo "::error::Decoded keystore file is empty."
-            exit 1
+          if [ -n "${SECRET_KEYSTORE_BASE64:-}" ] && [ -n "${SECRET_KEYSTORE_PASSWORD:-}" ] && [ -n "${SECRET_KEY_ALIAS:-}" ] && [ -n "${SECRET_KEY_PASSWORD:-}" ]; then
+            echo "Using permanent keystore from GitHub Actions Secrets."
+            KEYSTORE_FILE="${{ runner.temp }}/dailyexpense.jks"
+            printf '%s' "${SECRET_KEYSTORE_BASE64}" | tr -d '\r\n ' | base64 --decode > "${KEYSTORE_FILE}"
+            if [ ! -s "${KEYSTORE_FILE}" ]; then
+              echo "::error::Decoded keystore file is empty."
+              exit 1
+            fi
+            keytool -list -keystore "${KEYSTORE_FILE}" -alias "${SECRET_KEY_ALIAS}" -storepass "${SECRET_KEYSTORE_PASSWORD}" >/dev/null
+            echo "CI_KEYSTORE_PATH=${KEYSTORE_FILE}" >> "${GITHUB_ENV}"
+            echo "KEYSTORE_PASSWORD=${SECRET_KEYSTORE_PASSWORD}" >> "${GITHUB_ENV}"
+            echo "KEY_ALIAS=${SECRET_KEY_ALIAS}" >> "${GITHUB_ENV}"
+            echo "KEY_PASSWORD=${SECRET_KEY_PASSWORD}" >> "${GITHUB_ENV}"
+          else
+            PRIVATE=$(gh api "repos/${{ github.repository }}" --jq .private 2>/dev/null || echo "unknown")
+            if [ "${PRIVATE}" != "true" ]; then
+              echo "::error::This repository is PUBLIC (visibility=${PRIVATE}) and signing secrets are not set. Make the repo PRIVATE (Settings -> General -> Danger Zone -> Change visibility) so the permanent keystore can be stored safely in signing/, OR add KEYSTORE_BASE64, KEYSTORE_PASSWORD, KEY_ALIAS, and KEY_PASSWORD under Settings -> Secrets and variables -> Actions."
+              exit 1
+            fi
+
+            mkdir -p signing
+            REPO_KS="${GITHUB_WORKSPACE}/signing/dailyexpense.jks"
+            REPO_PASS_FILE="${GITHUB_WORKSPACE}/signing/keystore-password.txt"
+
+            if [ ! -f "${REPO_KS}" ] || [ ! -s "${REPO_PASS_FILE}" ]; then
+              echo "Creating permanent signing keystore in signing/dailyexpense.jks (one-time)..."
+              PASS=$(openssl rand -hex 16)
+              echo "::add-mask::${PASS}"
+              rm -f "${REPO_KS}"
+              keytool -genkeypair -v \
+                -keystore "${REPO_KS}" \
+                -alias dailyexpense \
+                -keyalg RSA -keysize 2048 -validity 10000 \
+                -storepass "${PASS}" -keypass "${PASS}" \
+                -dname "CN=Daily Expenses Ledger, O=DailyExpense, C=IN"
+              printf '%s' "${PASS}" > "${REPO_PASS_FILE}"
+
+              git config user.name "github-actions[bot]"
+              git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+              git add signing/dailyexpense.jks signing/keystore-password.txt
+              git commit -m "chore: add permanent signing keystore [skip ci]"
+              if ! (git pull --rebase origin "${GITHUB_REF_NAME}" && git push origin "HEAD:${GITHUB_REF_NAME}"); then
+                echo "::error::Could not push signing/dailyexpense.jks to the repository. Enable 'Read and write permissions' under Settings -> Actions -> General -> Workflow permissions, then re-run."
+                exit 1
+              fi
+              echo "Created and saved permanent keystore in signing/dailyexpense.jks." >> "${GITHUB_STEP_SUMMARY}"
+            else
+              echo "Reusing existing permanent keystore from signing/dailyexpense.jks."
+            fi
+
+            PASS=$(tr -d '\r\n' < "${REPO_PASS_FILE}")
+            echo "::add-mask::${PASS}"
+            keytool -list -keystore "${REPO_KS}" -alias dailyexpense -storepass "${PASS}" >/dev/null
+            echo "CI_KEYSTORE_PATH=${REPO_KS}" >> "${GITHUB_ENV}"
+            echo "KEYSTORE_PASSWORD=${PASS}" >> "${GITHUB_ENV}"
+            echo "KEY_ALIAS=dailyexpense" >> "${GITHUB_ENV}"
+            echo "KEY_PASSWORD=${PASS}" >> "${GITHUB_ENV}"
           fi
-          keytool -list -keystore "${KEYSTORE_FILE}" -alias "${KEY_ALIAS}" -storepass "${KEYSTORE_PASSWORD}" >/dev/null
-          echo "CI_KEYSTORE_PATH=${KEYSTORE_FILE}" >> "${GITHUB_ENV}"
-          echo "Decoded and verified keystore alias cleanly."
 
       - name: Compute Monotonic Version Code & Version Name
         shell: bash
@@ -85,17 +122,11 @@ jobs:
           EPOCH_MINUTES=$(( $(date +%s) / 60 ))
           INPUT_VERSION_NAME="${{ github.event.inputs.version_name }}"
           if [ -z "${INPUT_VERSION_NAME}" ]; then
-            INPUT_VERSION_NAME=$(grep -E '^\s*versionName\s*=' app/build.gradle.kts | head -n1 | sed -E 's/.*"([^"]+)".*/\1/' || echo "1.6")
+            INPUT_VERSION_NAME=$(awk -F'"' '/^[[:space:]]*versionName[[:space:]]*=/{print $2; exit}' app/build.gradle.kts || echo "1.6")
           fi
           echo "VERSION_CODE=${EPOCH_MINUTES}" >> "${GITHUB_ENV}"
           echo "VERSION_NAME=${INPUT_VERSION_NAME}" >> "${GITHUB_ENV}"
           echo "Resolved VERSION_CODE=${EPOCH_MINUTES}, VERSION_NAME=${INPUT_VERSION_NAME}"
-
-      - name: Set up JDK 21
-        uses: actions/setup-java@v5
-        with:
-          java-version: '21'
-          distribution: 'temurin'
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
@@ -116,10 +147,6 @@ jobs:
           fi
 
       - name: Build Universal APK
-        env:
-          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
-          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
           set -euo pipefail
           if [ -f app/signing.gradle ] && grep -q "signing.gradle" app/build.gradle.kts; then
@@ -130,10 +157,6 @@ jobs:
 
       - name: Verify, Ensure Permanent Signature & Print Summary
         shell: bash
-        env:
-          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
-          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
           set -euo pipefail
           if [ -f "app/build/outputs/apk/release/app-release.apk" ]; then
@@ -170,10 +193,10 @@ jobs:
           fi
 
           echo "=== APK Package Metadata ==="
+          PKG_LINE=""
           if [ -x "${AAPT2}" ]; then
             PKG_LINE=$("${AAPT2}" dump badging "${OUT_APK}" | grep -E "^package:" || true)
             echo "${PKG_LINE}"
-            echo "${PKG_LINE}" >> "${GITHUB_STEP_SUMMARY}"
             if ! echo "${PKG_LINE}" | grep -q "name='com.aistudio.dailyexpense.ledger'"; then
               echo "::error::Built APK package name does not match com.aistudio.dailyexpense.ledger!"
               exit 1
@@ -182,9 +205,15 @@ jobs:
 
           echo "=== APK Signing Certificate Fingerprint ==="
           "${APKSIGNER}" verify --verbose --print-certs "${OUT_APK}" | tee /tmp/apksigner_verify.txt
-          grep -i "SHA-256" /tmp/apksigner_verify.txt | tee -a "${GITHUB_STEP_SUMMARY}"
+          SHA_LINE=$(grep -i "SHA-256" /tmp/apksigner_verify.txt || true)
 
-      - name: Cleanup Decoded Keystore
+          {
+            echo "### Build Result"
+            echo "${PKG_LINE}"
+            echo "${SHA_LINE}"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Cleanup Temp Keystore
         if: always()
         shell: bash
         run: rm -f "${{ runner.temp }}/dailyexpense.jks"
