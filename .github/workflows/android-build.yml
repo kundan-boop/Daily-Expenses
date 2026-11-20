@@ -106,45 +106,83 @@ jobs:
       - name: Make gradlew executable
         run: chmod +x gradlew
 
-      - name: Build Universal Release APK
+      - name: Apply Fallback VersionCode if signing.gradle Missing
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -f app/signing.gradle ] || ! grep -q "signing.gradle" app/build.gradle.kts; then
+            echo "signing.gradle not linked; patching versionCode=${VERSION_CODE} directly for this CI build."
+            sed -i -E "s/versionCode(\s*=\s*|\s+)[0-9]+/versionCode = ${VERSION_CODE}/" app/build.gradle.kts
+          fi
+
+      - name: Build Universal APK
         env:
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
-        run: ./gradlew assembleRelease --stacktrace
-
-      - name: Verify & Print APK Package Metadata and Certificate SHA-256
-        shell: bash
         run: |
           set -euo pipefail
-          SRC_APK="app/build/outputs/apk/release/app-release.apk"
-          if [ ! -f "${SRC_APK}" ]; then
-            echo "::error::Built APK not found at ${SRC_APK}"
+          if [ -f app/signing.gradle ] && grep -q "signing.gradle" app/build.gradle.kts; then
+            ./gradlew assembleRelease --stacktrace
+          else
+            ./gradlew assembleDebug --stacktrace
+          fi
+
+      - name: Verify, Ensure Permanent Signature & Print Summary
+        shell: bash
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -f "app/build/outputs/apk/release/app-release.apk" ]; then
+            SRC_APK="app/build/outputs/apk/release/app-release.apk"
+          else
+            SRC_APK=$(find app/build/outputs/apk -name '*.apk' -print -quit || true)
+          fi
+          if [ -z "${SRC_APK}" ] || [ ! -f "${SRC_APK}" ]; then
+            echo "::error::No built APK found under app/build/outputs/apk"
             exit 1
           fi
 
           OUT_DIR="${{ runner.temp }}/apk-out"
           mkdir -p "${OUT_DIR}"
           OUT_APK="${OUT_DIR}/DailyExpense-v${VERSION_NAME}-${GITHUB_RUN_NUMBER}.apk"
-          cp "${SRC_APK}" "${OUT_APK}"
 
           SDK_DIR="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}"
           BUILD_TOOLS_DIR=$(ls -d "${SDK_DIR}"/build-tools/* 2>/dev/null | sort -V | tail -n 1)
           APKSIGNER="${BUILD_TOOLS_DIR}/apksigner"
           AAPT2="${BUILD_TOOLS_DIR}/aapt2"
+          ZIPALIGN="${BUILD_TOOLS_DIR}/zipalign"
+
+          if [ -f app/signing.gradle ] && grep -q "signing.gradle" app/build.gradle.kts; then
+            cp "${SRC_APK}" "${OUT_APK}"
+          else
+            "${ZIPALIGN}" -p -f 4 "${SRC_APK}" "${OUT_DIR}/aligned.apk"
+            "${APKSIGNER}" sign \
+              --ks "${CI_KEYSTORE_PATH}" \
+              --ks-key-alias "${KEY_ALIAS}" \
+              --ks-pass env:KEYSTORE_PASSWORD \
+              --key-pass env:KEY_PASSWORD \
+              --out "${OUT_APK}" "${OUT_DIR}/aligned.apk"
+            rm -f "${OUT_DIR}/aligned.apk"
+          fi
 
           echo "=== APK Package Metadata ==="
           if [ -x "${AAPT2}" ]; then
-            BADGING=$("${AAPT2}" dump badging "${OUT_APK}" | head -n 5)
-            echo "${BADGING}"
-            if ! echo "${BADGING}" | grep -q "name='com.aistudio.dailyexpense.ledger'"; then
+            PKG_LINE=$("${AAPT2}" dump badging "${OUT_APK}" | grep -E "^package:" || true)
+            echo "${PKG_LINE}"
+            echo "${PKG_LINE}" >> "${GITHUB_STEP_SUMMARY}"
+            if ! echo "${PKG_LINE}" | grep -q "name='com.aistudio.dailyexpense.ledger'"; then
               echo "::error::Built APK package name does not match com.aistudio.dailyexpense.ledger!"
               exit 1
             fi
           fi
 
           echo "=== APK Signing Certificate Fingerprint ==="
-          "${APKSIGNER}" verify --verbose --print-certs "${OUT_APK}"
+          "${APKSIGNER}" verify --verbose --print-certs "${OUT_APK}" | tee /tmp/apksigner_verify.txt
+          grep -i "SHA-256" /tmp/apksigner_verify.txt | tee -a "${GITHUB_STEP_SUMMARY}"
 
       - name: Cleanup Decoded Keystore
         if: always()
