@@ -158,9 +158,6 @@ jobs:
           gradle-version: '9.3.1'
           validate-wrappers: false
 
-      - name: Make gradlew executable
-        run: chmod +x gradlew
-
       - name: Apply Fallback VersionCode if signing.gradle Missing
         shell: bash
         run: |
@@ -171,12 +168,13 @@ jobs:
           fi
 
       - name: Build Universal APK
+        shell: bash
         run: |
           set -euo pipefail
           if [ -f app/signing.gradle ] && grep -q "signing.gradle" app/build.gradle.kts; then
-            ./gradlew assembleRelease --stacktrace
+            gradle assembleRelease --stacktrace
           else
-            ./gradlew assembleDebug --stacktrace
+            gradle assembleDebug --stacktrace
           fi
 
       - name: Verify, Ensure Permanent Signature & Print Summary
