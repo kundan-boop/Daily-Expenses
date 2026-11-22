@@ -158,6 +158,22 @@ jobs:
           gradle-version: '9.3.1'
           validate-wrappers: false
 
+      - name: Accept Android SDK Licenses
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDK_DIR="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          mkdir -p "${SDK_DIR}/licenses"
+          SDKMANAGER=""
+          if command -v sdkmanager >/dev/null 2>&1; then
+            SDKMANAGER="$(command -v sdkmanager)"
+          elif [ -x "${SDK_DIR}/cmdline-tools/latest/bin/sdkmanager" ]; then
+            SDKMANAGER="${SDK_DIR}/cmdline-tools/latest/bin/sdkmanager"
+          fi
+          if [ -n "${SDKMANAGER}" ]; then
+            yes | "${SDKMANAGER}" --sdk_root="${SDK_DIR}" --licenses >/dev/null 2>&1 || true
+          fi
+
       - name: Apply Fallback VersionCode if signing.gradle Missing
         shell: bash
         run: |
@@ -171,10 +187,27 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          [ -f .env.example ] || touch .env.example
           if [ -f app/signing.gradle ] && grep -q "signing.gradle" app/build.gradle.kts; then
-            gradle assembleRelease --stacktrace
+            GRADLE_TASK="assembleRelease"
           else
-            gradle assembleDebug --stacktrace
+            GRADLE_TASK="assembleDebug"
+          fi
+          BUILD_LOG="${{ runner.temp }}/gradle_build.log"
+          set +e
+          gradle "${GRADLE_TASK}" --stacktrace --console=plain --max-workers=2 -Dorg.gradle.jvmargs="-Xmx3g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8" 2>&1 | tee "${BUILD_LOG}"
+          BUILD_EXIT=${PIPESTATUS[0]}
+          set -e
+          if [ "${BUILD_EXIT}" -ne 0 ]; then
+            ERR_LINES=$(grep -E "^(FAILURE:|What went wrong:|\\* What went wrong:|> Task .* FAILED|e: |Execution failed|.*Exception:|Error:)" "${BUILD_LOG}" | head -n 15 | tr '\n' ' ')
+            echo "::error::Gradle ${GRADLE_TASK} failed (exit ${BUILD_EXIT}): ${ERR_LINES}"
+            {
+              echo "### Gradle Build Error (${GRADLE_TASK})"
+              echo '```'
+              tail -n 80 "${BUILD_LOG}"
+              echo '```'
+            } >> "${GITHUB_STEP_SUMMARY}"
+            exit "${BUILD_EXIT}"
           fi
 
       - name: Verify, Ensure Permanent Signature & Print Summary
