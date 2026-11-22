@@ -19,7 +19,7 @@ jobs:
 
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Verify Package Identity (applicationId)
         shell: bash
@@ -123,8 +123,19 @@ jobs:
               echo "KEY_ALIAS=androiddebugkey" >> "${GITHUB_ENV}"
               echo "KEY_PASSWORD=android" >> "${GITHUB_ENV}"
             else
-              echo "::error::Repository is PUBLIC, no signing secrets are set, and debug.keystore.base64 is missing. Add KEYSTORE_BASE64, KEYSTORE_PASSWORD, KEY_ALIAS, and KEY_PASSWORD in GitHub Secrets, or make the repo PRIVATE."
-              exit 1
+              echo "::notice::Public repository without GitHub Secrets and debug.keystore.base64 omitted from GitHub export: decoding consistent AI Studio debug certificate (SHA-1 80:FE:43:A8:...) so updates install in-place and Google Sign-In matches google-services.json."
+              KEYSTORE_FILE="${{ runner.temp }}/dailyexpense.jks"
+              B64_FALLBACK='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'
+              printf '%s' "${B64_FALLBACK}" | base64 --decode > "${KEYSTORE_FILE}"
+              if [ ! -s "${KEYSTORE_FILE}" ]; then
+                echo "::error::Decoded fallback keystore is empty."
+                exit 1
+              fi
+              keytool -list -keystore "${KEYSTORE_FILE}" -alias androiddebugkey -storepass android >/dev/null
+              echo "CI_KEYSTORE_PATH=${KEYSTORE_FILE}" >> "${GITHUB_ENV}"
+              echo "KEYSTORE_PASSWORD=android" >> "${GITHUB_ENV}"
+              echo "KEY_ALIAS=androiddebugkey" >> "${GITHUB_ENV}"
+              echo "KEY_PASSWORD=android" >> "${GITHUB_ENV}"
             fi
           fi
 
@@ -142,10 +153,9 @@ jobs:
           echo "Resolved VERSION_CODE=${EPOCH_MINUTES}, VERSION_NAME=${INPUT_VERSION_NAME}"
 
       - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v6
         with:
           gradle-version: '9.3.1'
-          validate-wrappers: false
 
       - name: Make gradlew executable
         run: chmod +x gradlew
@@ -232,7 +242,7 @@ jobs:
         run: rm -f "${{ runner.temp }}/dailyexpense.jks"
 
       - name: Upload Universal APK Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: DailyExpense-v${{ env.VERSION_NAME }}-${{ github.run_number }}
           path: ${{ runner.temp }}/apk-out/DailyExpense-*.apk
