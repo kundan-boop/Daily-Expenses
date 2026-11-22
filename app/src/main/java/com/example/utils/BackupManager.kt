@@ -7,7 +7,6 @@ import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
 import android.net.Uri
-import android.os.Build
 import android.util.Log
 import androidx.documentfile.provider.DocumentFile
 import androidx.work.*
@@ -249,15 +248,9 @@ object BackupManager {
     fun isNetworkAvailable(context: Context): Boolean {
         return try {
             val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return false
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                val activeNetwork = cm.activeNetwork ?: return false
-                val capabilities = cm.getNetworkCapabilities(activeNetwork) ?: return false
-                capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-            } else {
-                @Suppress("DEPRECATION")
-                val netInfo = cm.activeNetworkInfo
-                netInfo != null && netInfo.isConnected
-            }
+            val activeNetwork = cm.activeNetwork ?: return false
+            val capabilities = cm.getNetworkCapabilities(activeNetwork) ?: return false
+            capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
         } catch (e: Exception) {
             Log.w(TAG, "Error checking network availability: ${e.message}")
             false
@@ -1229,11 +1222,6 @@ object BackupManager {
         } catch (e: Exception) {
             Log.e(TAG, "Error enforcing 7-Day Drive backup rotation: ${e.message}")
         }
-    }
-
-    @Deprecated("Use enforceDriveSevenDayRotation", ReplaceWith("enforceDriveSevenDayRotation(folder, currentFileName)"))
-    fun enforceDrive3DayRotation(folder: DocumentFile, currentFileName: String? = null) {
-        enforceDriveSevenDayRotation(folder, currentFileName)
     }
 
     private fun cleanOldLocalBackups(dir: File) {
