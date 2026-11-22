@@ -153,6 +153,9 @@ class DailyExpenseViewModel(application: Application) : AndroidViewModel(applica
     )
     val googleAccountInfo: StateFlow<com.example.auth.GoogleSignInAccountInfo?> = _googleAccountInfo.asStateFlow()
 
+    val isNetworkOnline: StateFlow<Boolean> = com.example.utils.BackupManager.isOnlineFlow
+    val lastLocalBackupTime: StateFlow<Long> = com.example.utils.BackupManager.lastLocalBackupTimeFlow
+
     data class PendingProfileRestore(
         val name: String,
         val businessName: String,
@@ -327,6 +330,11 @@ class DailyExpenseViewModel(application: Application) : AndroidViewModel(applica
                         userEmail = com.example.auth.GoogleAuthHelper.getCurrentAccountInfo()?.email,
                         snapshotCount = snapshots.size
                     )
+                    com.example.utils.BackupManager.markAllCloudSyncedIfReady(
+                        ctx,
+                        driveSucceeded = false,
+                        firebaseSucceeded = true
+                    )
                     kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
                         onComplete?.invoke(true, "Synced to Firebase Firestore (${snapshots.size} backup(s))")
                     }
@@ -462,12 +470,16 @@ class DailyExpenseViewModel(application: Application) : AndroidViewModel(applica
                 if (success) {
                     val now = System.currentTimeMillis()
                     com.example.utils.BackupManager.setPendingDriveBackup(getApplication(), false)
-                    com.example.utils.BackupManager.markBackupCompleted(getApplication())
                     com.example.utils.BackupManager.updateBackupStatus(
                         getApplication(),
                         com.example.utils.BackupState.SUCCESS,
                         now,
                         null
+                    )
+                    com.example.utils.BackupManager.markAllCloudSyncedIfReady(
+                        getApplication(),
+                        driveSucceeded = true,
+                        firebaseSucceeded = false
                     )
                 } else {
                     com.example.utils.BackupManager.setPendingDriveBackup(getApplication(), true)
@@ -945,6 +957,40 @@ class DailyExpenseViewModel(application: Application) : AndroidViewModel(applica
         scope = viewModelScope,
         started = SharingStarted.WhileSubscribed(5000),
         initialValue = emptyList()
+    )
+
+    val pendingSyncCount: StateFlow<Int> = combine(
+        repository.observeUnsyncedEntriesCount(),
+        com.example.utils.BackupManager.pendingOfflineMutationsFlow,
+        hasPendingDriveBackup
+    ) { unsyncedDb, offlineMutations, pendingDrive ->
+        val pendingFirebase = com.example.utils.AppPreferencesManager.hasPendingFirebaseBackup(getApplication())
+        val total = unsyncedDb + offlineMutations
+        if (total == 0 && (pendingDrive || pendingFirebase)) 1 else total
+    }.stateIn(
+        scope = viewModelScope,
+        started = SharingStarted.WhileSubscribed(5000),
+        initialValue = 0
+    )
+
+    val showDashboardBackupAlert: StateFlow<Boolean> = combine(
+        driveFolderName,
+        googleAccountInfo,
+        pendingSyncCount
+    ) { driveFolder, accountInfo, pendingCount ->
+        com.example.utils.BackupManager.shouldShowBackupAlert(
+            googleConnected = driveFolder != null,
+            firebaseConnected = accountInfo != null,
+            pendingCount = pendingCount
+        )
+    }.stateIn(
+        scope = viewModelScope,
+        started = SharingStarted.WhileSubscribed(5000),
+        initialValue = com.example.utils.BackupManager.shouldShowBackupAlert(
+            googleConnected = com.example.utils.BackupManager.getDriveFolderName(application) != null,
+            firebaseConnected = com.example.auth.GoogleAuthHelper.getCurrentAccountInfo() != null,
+            pendingCount = 0
+        )
     )
 
     // 1. Independent Customer List Search State (Customer List page only)
@@ -1511,6 +1557,7 @@ class DailyExpenseViewModel(application: Application) : AndroidViewModel(applica
         notes: String = "",
         collectToday: Boolean = false,
         collectDueDate: Long? = null,
+        reminderEnabled: Boolean = true,
         profilePhotoUri: String? = null,
         onSuccess: () -> Unit = {},
         onError: (Throwable) -> Unit = {}
@@ -1527,6 +1574,7 @@ class DailyExpenseViewModel(application: Application) : AndroidViewModel(applica
                             notes = notes.trim(),
                             collectToday = collectToday,
                             collectDueDate = collectDueDate,
+                            reminderEnabled = reminderEnabled,
                             profilePhotoUri = profilePhotoUri,
                             createdTimestamp = System.currentTimeMillis(),
                             lastUpdatedTimestamp = System.currentTimeMillis()
@@ -1554,6 +1602,12 @@ class DailyExpenseViewModel(application: Application) : AndroidViewModel(applica
             } catch (e: Exception) {
                 onError(e)
             }
+        }
+    }
+
+    fun updateCustomerReminderEnabled(customerId: Long, enabled: Boolean) {
+        viewModelScope.launch(Dispatchers.IO) {
+            repository.updateCustomerReminderEnabled(customerId, enabled)
         }
     }
 

@@ -71,10 +71,12 @@ class DriveBackupWorker(
                 return@withContext Result.success()
             }
 
-            // Always update 2-day local daily backup
+            // Always update 4-copy local backup snapshot
             BackupManager.performDailyBackup(applicationContext, pkg.jsonString)
 
             var needsRetry = false
+            var driveOk = false
+            var firebaseOk = false
 
             if (driveEnabled) {
                 BackupManager.updateBackupStatus(
@@ -83,7 +85,7 @@ class DriveBackupWorker(
                     BackupManager.getLastDriveBackupTime(applicationContext),
                     null
                 )
-                val driveOk = BackupManager.performDriveAutoBackup(applicationContext, pkg.jsonString)
+                driveOk = BackupManager.performDriveAutoBackup(applicationContext, pkg.jsonString)
                 if (driveOk) {
                     val now = System.currentTimeMillis()
                     BackupManager.setPendingDriveBackup(applicationContext, false)
@@ -106,16 +108,17 @@ class DriveBackupWorker(
             }
 
             if (firebaseEnabled) {
-                val firebaseOk = BackupManager.performPendingFirebaseBackup(applicationContext)
+                firebaseOk = BackupManager.performPendingFirebaseBackup(applicationContext)
                 if (!firebaseOk) {
                     needsRetry = true
                 }
             }
 
+            BackupManager.markAllCloudSyncedIfReady(applicationContext, driveOk, firebaseOk)
+
             return@withContext if (needsRetry) {
                 Result.retry()
             } else {
-                BackupManager.markBackupCompleted(applicationContext)
                 Result.success()
             }
         } catch (e: Exception) {

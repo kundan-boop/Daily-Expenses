@@ -18,7 +18,7 @@ import kotlinx.coroutines.launch
         MonthlyExpenseEntity::class,
         CategoryEntity::class
     ],
-    version = 7,
+    version = 8,
     exportSchema = true
 )
 @TypeConverters(Converters::class)
@@ -30,7 +30,7 @@ abstract class AppDatabase : RoomDatabase() {
 
     companion object {
         const val DATABASE_NAME = "daily_expense_db"
-        const val DATABASE_VERSION = 7
+        const val DATABASE_VERSION = 8
 
         @Volatile
         private var INSTANCE: AppDatabase? = null
@@ -158,6 +158,16 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        internal val MIGRATION_7_8 = object : Migration(7, 8) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                addColumnIfNotExists(db, "customers", "reminderEnabled", "INTEGER NOT NULL DEFAULT 1")
+                addColumnIfNotExists(db, "transactions", "synced", "INTEGER NOT NULL DEFAULT 1")
+                addColumnIfNotExists(db, "monthly_expenses", "synced", "INTEGER NOT NULL DEFAULT 1")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_transactions_synced` ON `transactions` (`synced`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_monthly_expenses_synced` ON `monthly_expenses` (`synced`)")
+            }
+        }
+
         fun getDatabase(context: Context): AppDatabase {
             return INSTANCE ?: synchronized(this) {
                 val instance = Room.databaseBuilder(
@@ -166,7 +176,7 @@ abstract class AppDatabase : RoomDatabase() {
                     DATABASE_NAME
                 )
                 .setJournalMode(JournalMode.WRITE_AHEAD_LOGGING)
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8)
                 .addCallback(DatabaseCallback())
                 .build()
                 INSTANCE = instance

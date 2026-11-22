@@ -33,6 +33,7 @@ class MainApplication : Application(), ImageLoaderFactory {
 
         com.example.utils.AppPreferencesManager.init(this)
         com.example.utils.BackupManager.init(this)
+        com.example.utils.DueReminderHelper.ensureScheduledIfEnabled(this)
     }
 
     override fun newImageLoader(): ImageLoader {

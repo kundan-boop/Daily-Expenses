@@ -1,5 +1,6 @@
 package com.example.data
 
+import androidx.room.ColumnInfo
 import androidx.room.Entity
 import androidx.room.ForeignKey
 import androidx.room.Index
@@ -20,7 +21,8 @@ import androidx.room.PrimaryKey
         Index("dateTimestamp"),
         Index("transactionType"),
         Index("paymentMode"),
-        Index(value = ["customerId", "dateTimestamp"])
+        Index(value = ["customerId", "dateTimestamp"]),
+        Index("synced")
     ]
 )
 data class TransactionEntity(
@@ -34,5 +36,7 @@ data class TransactionEntity(
     val category: String = "General",
     val attachmentPath: String? = null,
     val paymentMode: String = "CASH", // CASH, UPI, BANK, CARD
-    val status: String = "COMPLETED" // COMPLETED, PENDING
+    val status: String = "COMPLETED", // COMPLETED, PENDING
+    @ColumnInfo(defaultValue = "1")
+    val synced: Boolean = true
 )

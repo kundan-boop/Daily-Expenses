@@ -239,7 +239,7 @@ class CustomerLedgerFeaturesTest {
             db.clearAllTables()
             db.openHelper.readableDatabase.version
         }
-        assertEquals(7, dbVersion)
+        assertEquals(AppDatabase.DATABASE_VERSION, dbVersion)
 
         val custAlphaId = db.customerDao().insertCustomer(
             CustomerEntity(name = "Alpha Store", mobileNumber = "9000011111")

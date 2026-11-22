@@ -107,6 +107,7 @@ fun SettingsScreen(
         )
 
         SettingsRoute.Notifications -> NotificationsSettingsSubScreen(
+            dailyExpenseViewModel = dailyExpenseViewModel,
             onBack = handleBackNavigation
         )
 

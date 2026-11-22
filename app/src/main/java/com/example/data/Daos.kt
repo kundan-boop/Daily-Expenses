@@ -40,6 +40,9 @@ interface CustomerDao {
     @Update
     suspend fun updateCustomer(customer: CustomerEntity)
 
+    @Query("UPDATE customers SET reminderEnabled = :enabled WHERE id = :customerId")
+    suspend fun updateReminderEnabled(customerId: Long, enabled: Boolean)
+
     @Delete
     suspend fun deleteCustomer(customer: CustomerEntity)
 }
@@ -178,6 +181,15 @@ interface TransactionDao {
     @Update
     suspend fun updateTransaction(transaction: TransactionEntity)
 
+    @Query("SELECT COUNT(*) FROM transactions WHERE synced = 0")
+    fun observeUnsyncedCount(): Flow<Int>
+
+    @Query("SELECT COUNT(*) FROM transactions WHERE synced = 0")
+    suspend fun getUnsyncedCountDirect(): Int
+
+    @Query("UPDATE transactions SET synced = 1 WHERE synced = 0")
+    suspend fun markAllSynced()
+
     @Delete
     suspend fun deleteTransaction(transaction: TransactionEntity)
 }
@@ -189,6 +201,15 @@ interface MonthlyExpenseDao {
 
     @Query("SELECT * FROM monthly_expenses ORDER BY dateTimestamp DESC")
     fun getAllExpenses(): Flow<List<MonthlyExpenseEntity>>
+
+    @Query("SELECT COUNT(*) FROM monthly_expenses WHERE synced = 0")
+    fun observeUnsyncedCount(): Flow<Int>
+
+    @Query("SELECT COUNT(*) FROM monthly_expenses WHERE synced = 0")
+    suspend fun getUnsyncedCountDirect(): Int
+
+    @Query("UPDATE monthly_expenses SET synced = 1 WHERE synced = 0")
+    suspend fun markAllSynced()
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertExpense(expense: MonthlyExpenseEntity): Long

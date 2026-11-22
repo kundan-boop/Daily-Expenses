@@ -65,6 +65,7 @@ fun AddCustomerDialog(
     var notes by remember(draftKey) { mutableStateOf(customerToEdit?.notes ?: "") }
     var collectToday by remember(draftKey) { mutableStateOf(customerToEdit?.collectToday ?: false) }
     var collectDueDate by remember(draftKey) { mutableStateOf<Long?>(customerToEdit?.collectDueDate) }
+    var reminderEnabled by remember(draftKey) { mutableStateOf(customerToEdit?.reminderEnabled ?: true) }
     var showDatePicker by remember { mutableStateOf(false) }
     var nameError by remember { mutableStateOf(false) }
     var isSaving by remember { mutableStateOf(false) }
@@ -355,6 +356,34 @@ fun AddCustomerDialog(
                             }
                         }
                     }
+
+                    if (collectDueDate != null) {
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "Due Date Reminder Alert",
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = c.textPrimary,
+                                modifier = Modifier.weight(1f)
+                            )
+                            Switch(
+                                checked = reminderEnabled,
+                                onCheckedChange = { reminderEnabled = it },
+                                colors = SwitchDefaults.colors(
+                                    checkedThumbColor = Color.White,
+                                    checkedTrackColor = c.greenPrimary,
+                                    uncheckedThumbColor = c.textMuted,
+                                    uncheckedTrackColor = c.border
+                                ),
+                                modifier = Modifier.testTag("customer_dialog_reminder_switch")
+                            )
+                        }
+                    }
                 }
             }
         },
@@ -376,6 +405,7 @@ fun AddCustomerDialog(
                                 notes = notes,
                                 collectToday = collectToday,
                                 collectDueDate = collectDueDate,
+                                reminderEnabled = reminderEnabled,
                                 onSuccess = {
                                     isSaving = false
                                     onDismiss()
@@ -398,7 +428,8 @@ fun AddCustomerDialog(
                                     email = email.trim(),
                                     notes = notes.trim(),
                                     collectToday = collectToday,
-                                    collectDueDate = collectDueDate
+                                    collectDueDate = collectDueDate,
+                                    reminderEnabled = reminderEnabled
                                 ),
                                 onSuccess = {
                                     isSaving = false

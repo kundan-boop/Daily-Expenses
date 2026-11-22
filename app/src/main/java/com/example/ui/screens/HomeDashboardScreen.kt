@@ -69,7 +69,8 @@ fun HomeDashboardScreen(
     val recentTransactions by viewModel.recentTransactions.collectAsStateWithLifecycle()
     val backupStatus by viewModel.backupStatus.collectAsStateWithLifecycle()
     val firebaseBackupStatus by viewModel.firebaseBackupStatus.collectAsStateWithLifecycle()
-    val hasPendingDriveBackup by viewModel.hasPendingDriveBackup.collectAsStateWithLifecycle()
+    val showDashboardBackupAlert by viewModel.showDashboardBackupAlert.collectAsStateWithLifecycle()
+    val pendingSyncCount by viewModel.pendingSyncCount.collectAsStateWithLifecycle()
     val userProfile by authViewModel.userProfile.collectAsStateWithLifecycle()
     val isRefreshing by viewModel.isRefreshing.collectAsStateWithLifecycle()
 
@@ -84,9 +85,7 @@ fun HomeDashboardScreen(
 
     val overallNetBalance = dashboardSummary.totalYouWillReceive - dashboardSummary.totalYouNeedToPay
 
-    val showCloudBanner = backupStatus.state != com.example.utils.BackupState.SUCCESS ||
-        hasPendingDriveBackup ||
-        firebaseBackupStatus.state != com.example.utils.BackupState.SUCCESS
+    val showCloudBanner = showDashboardBackupAlert
 
     Scaffold(
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
@@ -220,6 +219,7 @@ fun HomeDashboardScreen(
                             BackupStatusWidget(
                                 backupStatus = backupStatus,
                                 firebaseBackupStatus = firebaseBackupStatus,
+                                pendingSyncCount = pendingSyncCount,
                                 onSyncNow = { viewModel.triggerDriveAutoBackupNow() },
                                 onSyncFirebaseNow = { viewModel.syncFirebaseBackupNow() },
                                 onOpenSettings = onOpenGoogleDriveSettings,

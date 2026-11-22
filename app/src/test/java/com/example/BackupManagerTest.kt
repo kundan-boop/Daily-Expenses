@@ -56,7 +56,7 @@ class BackupManagerTest {
         BackupManager.performDailyBackup(context, """{"trigger":true}""")
 
         val remainingFiles = backupDir.listFiles { _, name -> name.startsWith("backup_") && name.endsWith(".json") } ?: emptyArray()
-        assertTrue("Backups should be retained within rolling window (<= 2)", remainingFiles.size <= 2)
+        assertEquals("Backups should retain up to MAX_LOCAL_BACKUP_COPIES (4) copies", BackupManager.MAX_LOCAL_BACKUP_COPIES, remainingFiles.size)
     }
 
     @Test
@@ -116,5 +116,24 @@ class BackupManagerTest {
         // When a new change happens, isBackupNeededToday becomes true
         BackupManager.markDataChanged(context)
         assertTrue(BackupManager.isBackupNeededToday(context))
+    }
+
+    @Test
+    fun testShouldShowBackupAlert_andPendingMutationsAndLastLocalTime() {
+        assertTrue(BackupManager.shouldShowBackupAlert(googleConnected = false, firebaseConnected = true, pendingCount = 0))
+        assertTrue(BackupManager.shouldShowBackupAlert(googleConnected = true, firebaseConnected = false, pendingCount = 0))
+        assertTrue(BackupManager.shouldShowBackupAlert(googleConnected = true, firebaseConnected = true, pendingCount = 2))
+        assertFalse(BackupManager.shouldShowBackupAlert(googleConnected = true, firebaseConnected = true, pendingCount = 0))
+
+        BackupManager.clearPendingOfflineMutations(context)
+        assertEquals(0, BackupManager.getPendingOfflineMutationsCount(context))
+        BackupManager.incrementPendingOfflineMutations(context)
+        BackupManager.incrementPendingOfflineMutations(context)
+        assertEquals(2, BackupManager.getPendingOfflineMutationsCount(context))
+        BackupManager.clearPendingOfflineMutations(context)
+        assertEquals(0, BackupManager.getPendingOfflineMutationsCount(context))
+
+        BackupManager.performDailyBackup(context, """{"local":true}""")
+        assertTrue(BackupManager.getLastLocalBackupTime(context) > 0L)
     }
 }

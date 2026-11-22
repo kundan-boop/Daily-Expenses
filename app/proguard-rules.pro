@@ -39,5 +39,10 @@
 -keepnames class kotlinx.coroutines.CoroutineExceptionHandler {}
 -dontwarn kotlinx.coroutines.**
 
+# Keep WorkManager Workers
+-keep class * extends androidx.work.CoroutineWorker
+-keep class * extends androidx.work.Worker
+-keep class com.example.work.** { *; }
+
 # Preserve line numbers for crash debugging
 -keepattributes SourceFile,LineNumberTable

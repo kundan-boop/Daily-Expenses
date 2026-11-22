@@ -1,5 +1,6 @@
 package com.example.data
 
+import androidx.room.ColumnInfo
 import androidx.room.Entity
 import androidx.room.Index
 import androidx.room.PrimaryKey
@@ -26,5 +27,7 @@ data class CustomerEntity(
     val collectToday: Boolean = false,
     val collectDueDate: Long? = null,
     val createdTimestamp: Long = System.currentTimeMillis(),
-    val lastUpdatedTimestamp: Long = System.currentTimeMillis()
+    val lastUpdatedTimestamp: Long = System.currentTimeMillis(),
+    @ColumnInfo(defaultValue = "1")
+    val reminderEnabled: Boolean = true
 )

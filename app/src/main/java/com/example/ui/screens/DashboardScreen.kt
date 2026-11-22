@@ -60,6 +60,8 @@ fun DashboardScreen(
     val searchQuery by viewModel.customerSearchQuery.collectAsStateWithLifecycle()
     val backupStatus by viewModel.backupStatus.collectAsStateWithLifecycle()
     val firebaseBackupStatus by viewModel.firebaseBackupStatus.collectAsStateWithLifecycle()
+    val showDashboardBackupAlert by viewModel.showDashboardBackupAlert.collectAsStateWithLifecycle()
+    val pendingSyncCount by viewModel.pendingSyncCount.collectAsStateWithLifecycle()
     val userProfile by authViewModel?.userProfile?.collectAsStateWithLifecycle() ?: remember { mutableStateOf(null) }
 
     val view = androidx.compose.ui.platform.LocalView.current
@@ -444,20 +446,17 @@ fun DashboardScreen(
                         }
                     }
 
-                    // Prominent Backup Status Widget
-                    // Visible when:
-                    // 1. Drive is NOT connected (NOT_CONFIGURED)
-                    // 2. Drive is offline / backup is pending (PENDING_OFFLINE)
-                    // 3. Backup is currently in progress (IN_PROGRESS)
-                    // 4. Backup attempt failed (FAILED)
-                    // Automatically hidden when Drive is connected and backup is successfully up-to-date (SUCCESS)
-                    if (backupStatus.state != com.example.utils.BackupState.SUCCESS ||
-                        (firebaseBackupStatus.state != com.example.utils.BackupState.NOT_CONFIGURED &&
-                            firebaseBackupStatus.state != com.example.utils.BackupState.SUCCESS)
+                    // Prominent Backup Status Widget driven strictly by live state:
+                    // showAlert = !googleConnected || !firebaseConnected || pendingCount > 0
+                    androidx.compose.animation.AnimatedVisibility(
+                        visible = showDashboardBackupAlert,
+                        enter = expandVertically() + fadeIn(),
+                        exit = shrinkVertically() + fadeOut()
                     ) {
                         BackupStatusWidget(
                             backupStatus = backupStatus,
                             firebaseBackupStatus = firebaseBackupStatus,
+                            pendingSyncCount = pendingSyncCount,
                             onSyncNow = { viewModel.triggerDriveAutoBackupNow() },
                             onSyncFirebaseNow = { viewModel.syncFirebaseBackupNow() },
                             onOpenSettings = onOpenGoogleDriveSettings,
@@ -860,6 +859,7 @@ private data class BackupDisplayData(
 fun BackupStatusWidget(
     backupStatus: com.example.utils.DriveBackupStatus,
     firebaseBackupStatus: com.example.utils.FirebaseBackupStatus = com.example.utils.FirebaseBackupStatus(),
+    pendingSyncCount: Int = 0,
     onSyncNow: () -> Unit,
     onSyncFirebaseNow: () -> Unit = {},
     onOpenSettings: () -> Unit,
@@ -868,8 +868,19 @@ fun BackupStatusWidget(
 ) {
     val c = LedgerTheme.colors
     val s = LocalAppStrings.current
-    val driveDisplayData = when (backupStatus.state) {
-        com.example.utils.BackupState.SUCCESS -> {
+    val pendingLabel = if (pendingSyncCount > 0) " • $pendingSyncCount offline pending" else ""
+    val driveDisplayData = when {
+        pendingSyncCount > 0 && backupStatus.state == com.example.utils.BackupState.SUCCESS -> {
+            BackupDisplayData(
+                bgColor = c.amberTint,
+                borderColor = c.amberBorder,
+                icon = Icons.Default.CloudQueue,
+                iconColor = c.amberAccent,
+                title = s.driveBackupQueued,
+                subtitle = "$pendingSyncCount entry(s) will upload automatically when online"
+            )
+        }
+        backupStatus.state == com.example.utils.BackupState.SUCCESS -> {
             BackupDisplayData(
                 bgColor = c.greenTint,
                 borderColor = c.greenBorder,
@@ -880,27 +891,27 @@ fun BackupStatusWidget(
                     ?: "Auto-synced to DailyExpenseBackups"
             )
         }
-        com.example.utils.BackupState.PENDING_OFFLINE -> {
+        backupStatus.state == com.example.utils.BackupState.PENDING_OFFLINE -> {
             BackupDisplayData(
                 bgColor = c.amberTint,
                 borderColor = c.amberBorder,
                 icon = Icons.Default.CloudQueue,
                 iconColor = c.amberAccent,
                 title = s.driveBackupQueued,
-                subtitle = "Will upload automatically when connected"
+                subtitle = "Will upload automatically when connected$pendingLabel"
             )
         }
-        com.example.utils.BackupState.FAILED -> {
+        backupStatus.state == com.example.utils.BackupState.FAILED -> {
             BackupDisplayData(
                 bgColor = c.redTint,
                 borderColor = c.redBorder,
                 icon = Icons.Default.CloudOff,
                 iconColor = c.redDebit,
                 title = s.driveBackupRetry,
-                subtitle = backupStatus.errorMessage ?: "Tap to retry backup"
+                subtitle = (backupStatus.errorMessage ?: "Tap to retry backup") + pendingLabel
             )
         }
-        com.example.utils.BackupState.IN_PROGRESS -> {
+        backupStatus.state == com.example.utils.BackupState.IN_PROGRESS -> {
             BackupDisplayData(
                 bgColor = c.blueTint,
                 borderColor = c.blueBorder,
@@ -910,32 +921,34 @@ fun BackupStatusWidget(
                 subtitle = "Uploading snapshot to DailyExpenseBackups"
             )
         }
-        com.example.utils.BackupState.NOT_CONFIGURED -> {
+        else -> {
             BackupDisplayData(
                 bgColor = c.card,
                 borderColor = c.border,
                 icon = Icons.Default.CloudUpload,
                 iconColor = c.textMuted,
                 title = s.driveBackupNotConnected,
-                subtitle = s.tapToConnectDrive
+                subtitle = s.tapToConnectDrive + pendingLabel
             )
         }
     }
 
-    val firebaseBadgeText = when (firebaseBackupStatus.state) {
-        com.example.utils.BackupState.SUCCESS -> "CLOUD SYNCED"
-        com.example.utils.BackupState.PENDING_OFFLINE -> "QUEUED"
-        com.example.utils.BackupState.FAILED -> "RETRY"
-        com.example.utils.BackupState.IN_PROGRESS -> "SYNCING"
-        com.example.utils.BackupState.NOT_CONFIGURED -> "SIGN IN"
+    val firebaseBadgeText = when {
+        pendingSyncCount > 0 && firebaseBackupStatus.state == com.example.utils.BackupState.SUCCESS -> "QUEUED ($pendingSyncCount)"
+        firebaseBackupStatus.state == com.example.utils.BackupState.SUCCESS -> "CLOUD SYNCED"
+        firebaseBackupStatus.state == com.example.utils.BackupState.PENDING_OFFLINE -> "QUEUED"
+        firebaseBackupStatus.state == com.example.utils.BackupState.FAILED -> "RETRY"
+        firebaseBackupStatus.state == com.example.utils.BackupState.IN_PROGRESS -> "SYNCING"
+        else -> "SIGN IN"
     }
 
-    val driveBadgeText = when (backupStatus.state) {
-        com.example.utils.BackupState.SUCCESS -> "DRIVE CONNECTED"
-        com.example.utils.BackupState.PENDING_OFFLINE -> "QUEUED"
-        com.example.utils.BackupState.FAILED -> "FAILED"
-        com.example.utils.BackupState.IN_PROGRESS -> "SYNCING"
-        com.example.utils.BackupState.NOT_CONFIGURED -> "CONNECT"
+    val driveBadgeText = when {
+        pendingSyncCount > 0 && backupStatus.state == com.example.utils.BackupState.SUCCESS -> "QUEUED ($pendingSyncCount)"
+        backupStatus.state == com.example.utils.BackupState.SUCCESS -> "DRIVE CONNECTED"
+        backupStatus.state == com.example.utils.BackupState.PENDING_OFFLINE -> "QUEUED"
+        backupStatus.state == com.example.utils.BackupState.FAILED -> "FAILED"
+        backupStatus.state == com.example.utils.BackupState.IN_PROGRESS -> "SYNCING"
+        else -> "CONNECT"
     }
 
     Surface(

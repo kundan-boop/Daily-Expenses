@@ -8,14 +8,17 @@ import android.graphics.BitmapFactory
 import android.graphics.Color
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
+import com.example.auth.GoogleAuthHelper
 import com.example.data.AppDatabase
 import com.example.data.CustomerEntity
 import com.example.data.DatabaseSafetyManager
 import com.example.data.DbStartupState
+import com.example.data.MonthlyExpenseEntity
 import com.example.data.TransactionEntity
 import com.example.ui.AuthViewModel
 import com.example.ui.DailyExpenseViewModel
 import com.example.utils.AppPreferencesManager
+import com.example.utils.DueReminderHelper
 import com.example.utils.ImageUtils
 import com.example.utils.ThemeMode
 import com.example.utils.stringsForLanguage
@@ -140,30 +143,46 @@ class UpgradeSafetyAndFeaturesTest {
             sqlite.close()
         }
 
-        // Open through Room with additive migrations v5->v6->v7
+        // Open through Room with additive migrations v5->v6->v7->v8
         val roomDb = Room.databaseBuilder(app, AppDatabase::class.java, dbName)
-            .addMigrations(AppDatabase.MIGRATION_5_6, AppDatabase.MIGRATION_6_7)
+            .addMigrations(AppDatabase.MIGRATION_5_6, AppDatabase.MIGRATION_6_7, AppDatabase.MIGRATION_7_8)
             .allowMainThreadQueries()
             .build()
 
         try {
             val openDb = roomDb.openHelper.writableDatabase
-            assertEquals(7, openDb.version)
+            assertEquals(8, openDb.version)
 
-            // Verify composite index created by MIGRATION_6_7
-            val indexNames = mutableSetOf<String>()
+            // Verify composite & synced indexes created by MIGRATION_6_7 and MIGRATION_7_8
+            val txIndexNames = mutableSetOf<String>()
             openDb.query("PRAGMA index_list(`transactions`)").use { cursor ->
                 val nameCol = cursor.getColumnIndex("name")
                 while (cursor.moveToNext()) {
-                    if (nameCol != -1) indexNames.add(cursor.getString(nameCol))
+                    if (nameCol != -1) txIndexNames.add(cursor.getString(nameCol))
                 }
             }
             assertTrue(
-                "Expected composite index index_transactions_customerId_dateTimestamp, found: $indexNames",
-                indexNames.contains("index_transactions_customerId_dateTimestamp")
+                "Expected composite index index_transactions_customerId_dateTimestamp, found: $txIndexNames",
+                txIndexNames.contains("index_transactions_customerId_dateTimestamp")
+            )
+            assertTrue(
+                "Expected synced index index_transactions_synced, found: $txIndexNames",
+                txIndexNames.contains("index_transactions_synced")
             )
 
-            // Verify 100% of data preserved intact
+            val expenseIndexNames = mutableSetOf<String>()
+            openDb.query("PRAGMA index_list(`monthly_expenses`)").use { cursor ->
+                val nameCol = cursor.getColumnIndex("name")
+                while (cursor.moveToNext()) {
+                    if (nameCol != -1) expenseIndexNames.add(cursor.getString(nameCol))
+                }
+            }
+            assertTrue(
+                "Expected synced index index_monthly_expenses_synced, found: $expenseIndexNames",
+                expenseIndexNames.contains("index_monthly_expenses_synced")
+            )
+
+            // Verify 100% of data preserved intact + safe v8 defaults
             val customers = roomDb.customerDao().getAllCustomersDirect()
             assertEquals(1, customers.size)
             val customer = customers.first()
@@ -176,6 +195,7 @@ class UpgradeSafetyAndFeaturesTest {
             assertEquals("/data/user/0/app/files/profile_photos/kiran.jpg", customer.profilePhotoUri)
             assertTrue(customer.collectToday)
             assertEquals(1770000000000L, customer.collectDueDate)
+            assertTrue(customer.reminderEnabled)
 
             val txs = roomDb.transactionDao().getAllTransactionsDirect()
             assertEquals(1, txs.size)
@@ -189,11 +209,13 @@ class UpgradeSafetyAndFeaturesTest {
             assertEquals("/data/user/0/app/files/attachments/bill_501.jpg", tx.attachmentPath)
             assertEquals("UPI", tx.paymentMode)
             assertEquals("COMPLETED", tx.status)
+            assertTrue(tx.synced)
 
             val expenses = roomDb.monthlyExpenseDao().getAllExpensesDirect()
             assertEquals(1, expenses.size)
             assertEquals("Shop Rent", expenses.first().title)
             assertEquals(15000.0, expenses.first().amount, 0.0001)
+            assertTrue(expenses.first().synced)
 
             val categories = roomDb.categoryDao().getAllCategories().first()
             assertEquals(1, categories.size)
@@ -527,6 +549,116 @@ class UpgradeSafetyAndFeaturesTest {
         }
         assertEquals(1, existingTxs.size)
         assertEquals("Already On Phone", existingTxs.first().comment)
+
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            db.clearAllTables()
+        }
+        AppDatabase.resetInstanceForRecovery()
+    }
+
+    @Test
+    fun googleAuthHelper_resolvesBundledWebClientId() {
+        val app: Application = ApplicationProvider.getApplicationContext()
+        val clientId = GoogleAuthHelper.resolveWebClientId(app)
+        assertTrue(GoogleAuthHelper.isClientConfigAvailable(app))
+        assertNotNull(clientId)
+        assertTrue(clientId!!.contains(".apps.googleusercontent.com"))
+    }
+
+    @Test
+    fun dueReminderEligibility_enforcesMasterCustomerDateAndPendingBalance() {
+        val now = 1_795_000_000_000L
+        val endOfToday = DueReminderHelper.endOfTodayUtcMillis(now)
+        val futureDate = endOfToday + 86_400_000L
+
+        assertTrue(
+            DueReminderHelper.isEligibleForDueReminder(
+                masterEnabled = true,
+                customerReminderEnabled = true,
+                collectDueDate = endOfToday,
+                netBalance = 500.0,
+                nowMillis = now
+            )
+        )
+        assertFalse(
+            DueReminderHelper.isEligibleForDueReminder(
+                masterEnabled = false,
+                customerReminderEnabled = true,
+                collectDueDate = endOfToday,
+                netBalance = 500.0,
+                nowMillis = now
+            )
+        )
+        assertFalse(
+            DueReminderHelper.isEligibleForDueReminder(
+                masterEnabled = true,
+                customerReminderEnabled = false,
+                collectDueDate = endOfToday,
+                netBalance = 500.0,
+                nowMillis = now
+            )
+        )
+        assertFalse(
+            DueReminderHelper.isEligibleForDueReminder(
+                masterEnabled = true,
+                customerReminderEnabled = true,
+                collectDueDate = futureDate,
+                netBalance = 500.0,
+                nowMillis = now
+            )
+        )
+        assertFalse(
+            DueReminderHelper.isEligibleForDueReminder(
+                masterEnabled = true,
+                customerReminderEnabled = true,
+                collectDueDate = endOfToday,
+                netBalance = 0.0,
+                nowMillis = now
+            )
+        )
+
+        val delay = DueReminderHelper.computeDelayMillisUntilNextRun(9, 0, now)
+        assertTrue(delay in 1000L..86_400_000L)
+    }
+
+    @Test
+    fun offlineEntries_markedUnsyncedAndClearedByMarkAllSynced() = runBlocking {
+        val app: Application = ApplicationProvider.getApplicationContext()
+        AppDatabase.resetInstanceForRecovery()
+        val db = AppDatabase.getDatabase(app)
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            db.clearAllTables()
+        }
+
+        val cid = db.customerDao().insertCustomer(
+            CustomerEntity(name = "Offline Customer", mobileNumber = "9000012345")
+        )
+        db.transactionDao().insertTransaction(
+            TransactionEntity(
+                customerId = cid,
+                transactionType = "I_PAID",
+                amount = 1200.0,
+                synced = false
+            )
+        )
+        db.monthlyExpenseDao().insertExpense(
+            MonthlyExpenseEntity(
+                monthYear = "2026-11",
+                title = "Fuel",
+                category = "Transport",
+                amount = 350.0,
+                synced = false
+            )
+        )
+
+        assertEquals(1, db.transactionDao().getUnsyncedCountDirect())
+        assertEquals(1, db.monthlyExpenseDao().getUnsyncedCountDirect())
+
+        db.transactionDao().markAllSynced()
+        db.monthlyExpenseDao().markAllSynced()
+
+        assertEquals(0, db.transactionDao().getUnsyncedCountDirect())
+        assertEquals(0, db.monthlyExpenseDao().getUnsyncedCountDirect())
 
         kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
             db.clearAllTables()

@@ -1,5 +1,6 @@
 package com.example.ui.screens.settings
 
+import android.content.Intent
 import android.widget.Toast
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
@@ -18,13 +19,16 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.FileProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.ui.AuthViewModel
 import com.example.ui.DailyExpenseViewModel
 import com.example.ui.theme.*
 import com.example.utils.AppPreferencesManager
+import com.example.utils.BackupManager
 import com.example.utils.BackupState
 import com.example.utils.FirebaseBackupStatus
+import com.example.utils.LedgerDateFormatter
 import com.example.utils.LocalAppStrings
 import java.util.Locale
 
@@ -48,9 +52,14 @@ fun FirebaseBackupSettingsSubScreen(
     val isFirebaseBusy by (dailyExpenseViewModel?.isFirebaseBusy?.collectAsStateWithLifecycle()
         ?: remember { mutableStateOf(false) })
     val firebaseAutoBackupEnabled by AppPreferencesManager.firebaseAutoBackupEnabledFlow.collectAsStateWithLifecycle()
+    val dailyBackupsList by (dailyExpenseViewModel?.dailyBackupsList?.collectAsStateWithLifecycle()
+        ?: remember { mutableStateOf(emptyList()) })
+    val lastLocalBackupTime by (dailyExpenseViewModel?.lastLocalBackupTime?.collectAsStateWithLifecycle()
+        ?: remember { mutableStateOf(0L) })
 
     LaunchedEffect(Unit) {
         dailyExpenseViewModel?.refreshFirebaseState()
+        dailyExpenseViewModel?.refreshDailyBackupsList()
     }
 
     SettingsSubScreenScaffold(
@@ -313,6 +322,168 @@ fun FirebaseBackupSettingsSubScreen(
                                     Icon(Icons.Default.Restore, contentDescription = "Restore Cloud Snapshot", tint = c.greenPrimary, modifier = Modifier.size(15.dp))
                                     Spacer(modifier = Modifier.width(4.dp))
                                     Text(s.restore, fontSize = 11.5.sp, fontWeight = FontWeight.Bold, color = c.greenPrimary)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Local Device Backup Card (Every 7 days • max 4 local copies)
+        Card(
+            shape = RoundedCornerShape(20.dp),
+            colors = CardDefaults.cardColors(containerColor = c.card),
+            border = BorderStroke(1.dp, c.border),
+            elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag("local_backup_card")
+        ) {
+            Column(
+                modifier = Modifier.padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                FlowRow(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.Storage, contentDescription = null, tint = c.greenPrimary, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Local Device Backup", fontSize = 14.5.sp, fontWeight = FontWeight.Bold, color = c.textPrimary)
+                    }
+                    Surface(shape = RoundedCornerShape(6.dp), color = c.greenTint) {
+                        Text(
+                            text = "EVERY 7 DAYS • MAX ${BackupManager.MAX_LOCAL_BACKUP_COPIES}",
+                            fontSize = 8.5.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = c.greenPrimary,
+                            modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp)
+                        )
+                    }
+                }
+
+                val lastBackupLabel = when {
+                    lastLocalBackupTime > 0L -> LedgerDateFormatter.formatDateTimeWithYear(lastLocalBackupTime)
+                    dailyBackupsList.isNotEmpty() -> dailyBackupsList.first().dateDisplay
+                    else -> "Never"
+                }
+
+                Text(
+                    text = "Last local backup: $lastBackupLabel",
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = c.textSecondary,
+                    modifier = Modifier.testTag("last_local_backup_date_text")
+                )
+
+                Text(
+                    text = "Automatically saves an on-device ledger + profile snapshot every 7 days and keeps up to ${BackupManager.MAX_LOCAL_BACKUP_COPIES} latest copies.",
+                    fontSize = 11.5.sp,
+                    color = c.textMuted
+                )
+
+                OutlinedButton(
+                    onClick = {
+                        dailyExpenseViewModel?.triggerManualDailyBackup { success ->
+                            Toast.makeText(
+                                context,
+                                if (success) "Local backup saved!" else "Failed to create local backup",
+                                Toast.LENGTH_SHORT
+                            ).show()
+                        }
+                    },
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = c.greenPrimary),
+                    border = BorderStroke(1.dp, c.greenPrimary),
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 48.dp)
+                        .testTag("local_backup_now_button")
+                ) {
+                    Icon(Icons.Default.Backup, contentDescription = null, tint = c.greenPrimary, modifier = Modifier.size(16.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("Backup Now", fontSize = 12.5.sp, fontWeight = FontWeight.Bold, color = c.greenPrimary)
+                }
+
+                if (dailyBackupsList.isNotEmpty()) {
+                    val retainedCopies = dailyBackupsList.take(BackupManager.MAX_LOCAL_BACKUP_COPIES)
+                    Text(
+                        text = "LOCAL COPIES (${retainedCopies.size} / ${BackupManager.MAX_LOCAL_BACKUP_COPIES}):",
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = c.textMuted
+                    )
+                    retainedCopies.forEach { backup ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(c.cardElevated, RoundedCornerShape(10.dp))
+                                .padding(horizontal = 10.dp, vertical = 6.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Icon(Icons.Default.Description, contentDescription = null, tint = c.greenPrimary, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Column {
+                                    Text(
+                                        backup.dateDisplay,
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = c.textPrimary,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Text(backup.fileSizeStr, fontSize = 10.5.sp, color = c.textMuted)
+                                }
+                            }
+
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                IconButton(
+                                    onClick = {
+                                        authViewModel.suppressAutoLockOnce()
+                                        try {
+                                            val jsonContent = backup.file.readText()
+                                            dailyExpenseViewModel?.restoreFullBackupFromJson(jsonContent, authViewModel) { summary ->
+                                                showRestoreSummaryToast(context, summary)
+                                            }
+                                        } catch (e: Exception) {
+                                            Toast.makeText(context, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
+                                        }
+                                    },
+                                    modifier = Modifier.minimumInteractiveComponentSize()
+                                ) {
+                                    Icon(Icons.Default.Restore, contentDescription = "Restore Local Backup", tint = c.greenPrimary, modifier = Modifier.size(18.dp))
+                                }
+
+                                IconButton(
+                                    onClick = {
+                                        authViewModel.suppressAutoLockOnce()
+                                        try {
+                                            val fileUri = FileProvider.getUriForFile(
+                                                context,
+                                                "${context.packageName}.fileprovider",
+                                                backup.file
+                                            )
+                                            val sendIntent = Intent(Intent.ACTION_SEND).apply {
+                                                putExtra(Intent.EXTRA_STREAM, fileUri)
+                                                type = "application/json"
+                                                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                            }
+                                            context.startActivity(Intent.createChooser(sendIntent, "Share Backup File"))
+                                        } catch (e: Exception) {
+                                            Toast.makeText(context, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
+                                        }
+                                    },
+                                    modifier = Modifier.minimumInteractiveComponentSize()
+                                ) {
+                                    Icon(Icons.Default.Share, contentDescription = "Share Local Backup", tint = c.blueAccent, modifier = Modifier.size(17.dp))
                                 }
                             }
                         }

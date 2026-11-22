@@ -258,6 +258,38 @@ fun GoogleAccountSettingsSubScreen(
             ) {
                 Text("Cloud Diagnostics", fontSize = 16.sp, fontWeight = FontWeight.Bold, color = c.textPrimary)
 
+                val clientConfigOk = remember { GoogleAuthHelper.isClientConfigAvailable(context) }
+                Surface(
+                    shape = RoundedCornerShape(10.dp),
+                    color = if (clientConfigOk) c.greenTint else c.redTint,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("google_client_config_status")
+                ) {
+                    Row(
+                        modifier = Modifier.padding(10.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = if (clientConfigOk) Icons.Default.Verified else Icons.Default.Warning,
+                            contentDescription = null,
+                            tint = if (clientConfigOk) c.greenPrimary else c.redDebit,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = if (clientConfigOk) {
+                                "Client configuration ready (OAuth Web Client ID bundled). Ensure release/debug SHA-1 & SHA-256 match Firebase Console."
+                            } else {
+                                "Client configuration unavailable: missing default_web_client_id. Add SHA-1/SHA-256 in Firebase Console & refresh google-services.json."
+                            },
+                            fontSize = 11.5.sp,
+                            color = if (clientConfigOk) c.greenPrimary else c.redDebit,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                }
+
                 if (!connectionMessage.isNullOrBlank()) {
                     Surface(
                         shape = RoundedCornerShape(10.dp),

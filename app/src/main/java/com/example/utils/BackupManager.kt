@@ -13,6 +13,7 @@ import androidx.documentfile.provider.DocumentFile
 import androidx.work.*
 import com.example.data.AppDatabase
 import com.example.work.DriveBackupWorker
+import com.example.work.LocalBackupWorker
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -82,9 +83,11 @@ object BackupManager {
     private const val KEY_LAST_DRIVE_BACKUP_TIME = "last_drive_backup_time"
     private const val KEY_LAST_BACKUP_STATUS = "backup_last_status"
     private const val KEY_LAST_BACKUP_ERROR = "backup_last_error"
-    
+    private const val KEY_LAST_LOCAL_BACKUP_TIME = "last_local_backup_time"
+    private const val KEY_PENDING_OFFLINE_MUTATIONS = "pending_offline_mutations_count"
+
     // Retention policies
-    private const val MAX_LOCAL_BACKUP_DAYS = 2
+    const val MAX_LOCAL_BACKUP_COPIES = 4
     const val MAX_DRIVE_BACKUP_DAYS = 7
     const val DEDICATED_FOLDER_NAME = "DailyExpenseBackups"
 
@@ -111,31 +114,71 @@ object BackupManager {
     )
     val backupStatusFlow: StateFlow<DriveBackupStatus> = _backupStatusFlow.asStateFlow()
 
+    private val _lastLocalBackupTimeFlow = MutableStateFlow(0L)
+    val lastLocalBackupTimeFlow: StateFlow<Long> = _lastLocalBackupTimeFlow.asStateFlow()
+
+    private val _isOnlineFlow = MutableStateFlow(true)
+    val isOnlineFlow: StateFlow<Boolean> = _isOnlineFlow.asStateFlow()
+
+    private val _pendingOfflineMutationsFlow = MutableStateFlow(0)
+    val pendingOfflineMutationsFlow: StateFlow<Int> = _pendingOfflineMutationsFlow.asStateFlow()
+
+    fun shouldShowBackupAlert(
+        googleConnected: Boolean,
+        firebaseConnected: Boolean,
+        pendingCount: Int
+    ): Boolean = !googleConnected || !firebaseConnected || pendingCount > 0
+
     /**
-     * Initializes network monitoring so queued offline backups are automatically
-     * sent to Google Drive / Firebase as soon as network connectivity is restored.
+     * Initializes network monitoring, periodic 7-day local backup, and auto-syncs any pending
+     * offline backups as soon as network connectivity is available.
      */
     fun init(context: Context) {
         val appContext = context.applicationContext
         AppPreferencesManager.init(appContext)
+        _isOnlineFlow.value = isNetworkAvailable(appContext)
+        _lastLocalBackupTimeFlow.value = getLastLocalBackupTime(appContext)
+        _pendingOfflineMutationsFlow.value = getPendingOfflineMutationsCount(appContext)
         refreshBackupStatus(appContext)
         registerNetworkMonitor(appContext)
+        schedulePeriodicLocalBackup(appContext)
 
-        val hasDrivePending = hasPendingDriveBackup(appContext) &&
-            getDriveFolderUri(appContext) != null &&
-            AppPreferencesManager.isDriveAutoBackupEnabled(appContext)
-        val hasFirebasePending = AppPreferencesManager.hasPendingFirebaseBackup(appContext) &&
-            isFirebaseAutoBackupReady(appContext)
+        backupScope.launch {
+            val hasUnsyncedDb = hasUnsyncedDatabaseEntries(appContext) || getPendingOfflineMutationsCount(appContext) > 0
+            val hasDrivePending = (hasPendingDriveBackup(appContext) || hasUnsyncedDb) &&
+                getDriveFolderUri(appContext) != null &&
+                AppPreferencesManager.isDriveAutoBackupEnabled(appContext)
+            val hasFirebasePending = (AppPreferencesManager.hasPendingFirebaseBackup(appContext) || hasUnsyncedDb) &&
+                isFirebaseAutoBackupReady(appContext)
 
-        if (hasDrivePending || hasFirebasePending) {
-            Log.d(TAG, "Init: Detected pending offline backup. Enqueueing WorkManager task...")
-            enqueueDriveBackupWork(appContext)
-            if (isNetworkAvailable(appContext)) {
-                backupScope.launch {
-                    if (hasDrivePending) performPendingDriveBackup(appContext)
-                    if (hasFirebasePending) performPendingFirebaseBackup(appContext)
+            if (hasDrivePending || hasFirebasePending) {
+                Log.d(TAG, "Init: Detected pending offline backup/entries. Enqueueing WorkManager task...")
+                enqueueDriveBackupWork(appContext)
+                if (isNetworkAvailable(appContext)) {
+                    var driveOk = false
+                    var firebaseOk = false
+                    if (hasDrivePending) driveOk = performPendingDriveBackup(appContext)
+                    if (hasFirebasePending) firebaseOk = performPendingFirebaseBackup(appContext)
+                    markAllCloudSyncedIfReady(appContext, driveOk, firebaseOk)
                 }
             }
+        }
+    }
+
+    fun schedulePeriodicLocalBackup(context: Context) {
+        try {
+            val request = PeriodicWorkRequestBuilder<LocalBackupWorker>(7, TimeUnit.DAYS)
+                .addTag("periodic_local_backup")
+                .build()
+
+            WorkManager.getInstance(context.applicationContext).enqueueUniquePeriodicWork(
+                LocalBackupWorker.WORK_NAME,
+                ExistingPeriodicWorkPolicy.KEEP,
+                request
+            )
+            Log.d(TAG, "Scheduled 7-day periodic LocalBackupWorker (max $MAX_LOCAL_BACKUP_COPIES local copies).")
+        } catch (e: Exception) {
+            Log.w(TAG, "Could not schedule periodic LocalBackupWorker: ${e.message}")
         }
     }
 
@@ -151,23 +194,30 @@ object BackupManager {
 
                 cm.registerNetworkCallback(networkRequest, object : ConnectivityManager.NetworkCallback() {
                     override fun onAvailable(network: Network) {
-                        Log.d(TAG, "Network connection restored. Checking for queued cloud backups...")
-                        val driveReady = hasPendingDriveBackup(context) &&
-                            getDriveFolderUri(context) != null &&
-                            AppPreferencesManager.isDriveAutoBackupEnabled(context)
-                        val firebaseReady = AppPreferencesManager.hasPendingFirebaseBackup(context) &&
-                            isFirebaseAutoBackupReady(context)
+                        _isOnlineFlow.value = true
+                        Log.d(TAG, "Network connection restored. Checking for queued cloud backups & unsynced entries...")
+                        backupScope.launch {
+                            val hasUnsyncedDb = hasUnsyncedDatabaseEntries(context) || getPendingOfflineMutationsCount(context) > 0
+                            val driveConfigured = getDriveFolderUri(context) != null &&
+                                AppPreferencesManager.isDriveAutoBackupEnabled(context)
+                            val firebaseConfigured = isFirebaseAutoBackupReady(context)
 
-                        if (driveReady || firebaseReady) {
-                            enqueueDriveBackupWork(context)
-                            backupScope.launch {
-                                if (driveReady) performPendingDriveBackup(context)
-                                if (firebaseReady) performPendingFirebaseBackup(context)
+                            val driveReady = driveConfigured && (hasPendingDriveBackup(context) || hasUnsyncedDb)
+                            val firebaseReady = firebaseConfigured && (AppPreferencesManager.hasPendingFirebaseBackup(context) || hasUnsyncedDb)
+
+                            if (driveReady || firebaseReady) {
+                                enqueueDriveBackupWork(context)
+                                var driveOk = false
+                                var firebaseOk = false
+                                if (driveReady) driveOk = performPendingDriveBackup(context)
+                                if (firebaseReady) firebaseOk = performPendingFirebaseBackup(context)
+                                markAllCloudSyncedIfReady(context, driveOk, firebaseOk)
                             }
                         }
                     }
 
                     override fun onLost(network: Network) {
+                        _isOnlineFlow.value = isNetworkAvailable(context)
                         Log.d(TAG, "Network connection lost.")
                         if (hasPendingDriveBackup(context)) {
                             updateBackupStatus(
@@ -222,6 +272,70 @@ object BackupManager {
         return dir
     }
 
+    fun getLastLocalBackupTime(context: Context): Long {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val stored = prefs.getLong(KEY_LAST_LOCAL_BACKUP_TIME, 0L)
+        if (stored > 0L) return stored
+        val newestFile = getDailyBackups(context).firstOrNull()?.timestamp ?: 0L
+        if (newestFile > 0L) {
+            prefs.edit().putLong(KEY_LAST_LOCAL_BACKUP_TIME, newestFile).apply()
+        }
+        return newestFile
+    }
+
+    fun getPendingOfflineMutationsCount(context: Context): Int {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return prefs.getInt(KEY_PENDING_OFFLINE_MUTATIONS, 0)
+    }
+
+    fun incrementPendingOfflineMutations(context: Context) {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val next = prefs.getInt(KEY_PENDING_OFFLINE_MUTATIONS, 0) + 1
+        prefs.edit().putInt(KEY_PENDING_OFFLINE_MUTATIONS, next).apply()
+        _pendingOfflineMutationsFlow.value = next
+    }
+
+    fun clearPendingOfflineMutations(context: Context) {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        prefs.edit().putInt(KEY_PENDING_OFFLINE_MUTATIONS, 0).apply()
+        _pendingOfflineMutationsFlow.value = 0
+    }
+
+    suspend fun hasUnsyncedDatabaseEntries(context: Context): Boolean = withContext(Dispatchers.IO) {
+        try {
+            val db = AppDatabase.getDatabase(context)
+            db.transactionDao().getUnsyncedCountDirect() > 0 ||
+                db.monthlyExpenseDao().getUnsyncedCountDirect() > 0
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    suspend fun markAllCloudSyncedIfReady(
+        context: Context,
+        driveSucceeded: Boolean,
+        firebaseSucceeded: Boolean
+    ) = withContext(Dispatchers.IO) {
+        val driveConfigured = getDriveFolderUri(context) != null &&
+            AppPreferencesManager.isDriveAutoBackupEnabled(context)
+        val firebaseConfigured = isFirebaseAutoBackupReady(context)
+        if (!driveConfigured && !firebaseConfigured) return@withContext
+
+        val driveOk = !driveConfigured || driveSucceeded || !hasPendingDriveBackup(context)
+        val firebaseOk = !firebaseConfigured || firebaseSucceeded || !AppPreferencesManager.hasPendingFirebaseBackup(context)
+        if (driveOk && firebaseOk && (driveSucceeded || firebaseSucceeded)) {
+            try {
+                val db = AppDatabase.getDatabase(context)
+                db.transactionDao().markAllSynced()
+                db.monthlyExpenseDao().markAllSynced()
+            } catch (e: Exception) {
+                Log.w(TAG, "Could not mark DB entries synced: ${e.message}")
+            }
+            clearPendingOfflineMutations(context)
+            markBackupCompleted(context)
+        }
+    }
+
     /**
      * Flags that customer, transaction, or expense data was added, edited, or removed since the last backup.
      */
@@ -247,6 +361,7 @@ object BackupManager {
         markDataChanged(appContext)
 
         val online = isNetworkAvailable(appContext)
+        _isOnlineFlow.value = online
         val driveConfigured = getDriveFolderUri(appContext) != null &&
             AppPreferencesManager.isDriveAutoBackupEnabled(appContext)
         val firebaseConfigured = isFirebaseAutoBackupReady(appContext)
@@ -329,10 +444,11 @@ object BackupManager {
                     return@withLock
                 }
 
-                // 1. Local Daily Backup (always 2-day rolling)
+                // 1. Local Backup (retains up to 4 most recent copies)
                 performDailyBackup(context, jsonString)
 
                 // 2. Google Drive Auto-Backup (isolated error handling)
+                var driveOk = false
                 val driveFolderUri = getDriveFolderUri(context)
                 if (driveFolderUri != null && AppPreferencesManager.isDriveAutoBackupEnabled(context)) {
                     val online = isNetworkAvailable(context)
@@ -340,6 +456,7 @@ object BackupManager {
                         updateBackupStatus(context, BackupState.IN_PROGRESS, getLastDriveBackupTime(context), null)
                         val success = performDriveAutoBackup(context, jsonString)
                         if (success) {
+                            driveOk = true
                             val now = System.currentTimeMillis()
                             setPendingDriveBackup(context, false)
                             updateBackupStatus(context, BackupState.SUCCESS, now, null)
@@ -368,9 +485,11 @@ object BackupManager {
                 }
 
                 // 3. Firebase Cloud Auto-Backup (completely independent of Drive status)
-                syncFirebaseBackupLocked(context, pkg)
+                val firebaseOk = syncFirebaseBackupLocked(context, pkg)
 
-                markBackupCompleted(context)
+                if (driveOk || firebaseOk) {
+                    markAllCloudSyncedIfReady(context, driveOk, firebaseOk)
+                }
             } catch (e: Exception) {
                 Log.e(TAG, "Error in auto-backup pipeline: ${e.message}", e)
                 updateBackupStatus(context, BackupState.FAILED, getLastDriveBackupTime(context), e.message)
@@ -950,8 +1069,8 @@ object BackupManager {
     }
 
     /**
-     * Creates or updates daily backup locally and into Google Drive (if folder selected).
-     * Enforces local 2-day rolling retention.
+     * Creates or updates local backup snapshot on-device.
+     * Enforces local 4-copy retention.
      */
     fun performDailyBackup(context: Context, jsonString: String): DailyBackupInfo? {
         if (jsonString.isBlank()) return null
@@ -962,14 +1081,20 @@ object BackupManager {
 
             // Same-day overwrite: Overwrites existing today file if present
             backupFile.writeText(jsonString, Charsets.UTF_8)
-            Log.d(TAG, "Saved daily backup file locally: ${backupFile.name}")
+            val now = System.currentTimeMillis()
+            context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .edit()
+                .putLong(KEY_LAST_LOCAL_BACKUP_TIME, now)
+                .apply()
+            _lastLocalBackupTimeFlow.value = now
+            Log.d(TAG, "Saved local backup snapshot: ${backupFile.name}")
 
             cleanOldLocalBackups(dir)
 
             val backups = getDailyBackups(context)
             return backups.find { it.fileName == backupFile.name } ?: backups.firstOrNull()
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to perform daily backup: ${e.message}", e)
+            Log.e(TAG, "Failed to perform local backup: ${e.message}", e)
             return null
         }
     }
@@ -1113,14 +1238,14 @@ object BackupManager {
 
     private fun cleanOldLocalBackups(dir: File) {
         val files = dir.listFiles { _, name -> name.startsWith("backup_") && name.endsWith(".json") } ?: return
-        if (files.size > MAX_LOCAL_BACKUP_DAYS) {
+        if (files.size > MAX_LOCAL_BACKUP_COPIES) {
             val sortedOldestFirst = files.sortedBy { it.lastModified() }
-            val filesToDeleteCount = sortedOldestFirst.size - MAX_LOCAL_BACKUP_DAYS
+            val filesToDeleteCount = sortedOldestFirst.size - MAX_LOCAL_BACKUP_COPIES
 
             for (i in 0 until filesToDeleteCount) {
                 val oldestFile = sortedOldestFirst[i]
                 val deleted = oldestFile.delete()
-                Log.d(TAG, "2-Day Local Retention: Deleted old backup file ${oldestFile.name}, success=$deleted")
+                Log.d(TAG, "Local Retention ($MAX_LOCAL_BACKUP_COPIES copies): Deleted old backup file ${oldestFile.name}, success=$deleted")
             }
         }
     }

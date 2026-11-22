@@ -6,9 +6,9 @@ on:
   workflow_dispatch:
     inputs:
       version_name:
-        description: 'Readable versionName (e.g., 1.6)'
+        description: 'Readable versionName (e.g., 1.7)'
         required: false
-        default: '1.6'
+        default: '1.7'
 
 permissions:
   contents: write
@@ -71,48 +71,61 @@ jobs:
             echo "KEY_PASSWORD=${SECRET_KEY_PASSWORD}" >> "${GITHUB_ENV}"
           else
             PRIVATE=$(gh api "repos/${{ github.repository }}" --jq .private 2>/dev/null || echo "unknown")
-            if [ "${PRIVATE}" != "true" ]; then
-              echo "::error::This repository is PUBLIC (visibility=${PRIVATE}) and signing secrets are not set. Make the repo PRIVATE (Settings -> General -> Danger Zone -> Change visibility) so the permanent keystore can be stored safely in signing/, OR add KEYSTORE_BASE64, KEYSTORE_PASSWORD, KEY_ALIAS, and KEY_PASSWORD under Settings -> Secrets and variables -> Actions."
-              exit 1
-            fi
+            if [ "${PRIVATE}" = "true" ]; then
+              mkdir -p signing
+              REPO_KS="${GITHUB_WORKSPACE}/signing/dailyexpense.jks"
+              REPO_PASS_FILE="${GITHUB_WORKSPACE}/signing/keystore-password.txt"
 
-            mkdir -p signing
-            REPO_KS="${GITHUB_WORKSPACE}/signing/dailyexpense.jks"
-            REPO_PASS_FILE="${GITHUB_WORKSPACE}/signing/keystore-password.txt"
+              if [ ! -f "${REPO_KS}" ] || [ ! -s "${REPO_PASS_FILE}" ]; then
+                echo "Creating permanent signing keystore in signing/dailyexpense.jks (one-time)..."
+                PASS=$(openssl rand -hex 16)
+                echo "::add-mask::${PASS}"
+                rm -f "${REPO_KS}"
+                keytool -genkeypair -v \
+                  -keystore "${REPO_KS}" \
+                  -alias dailyexpense \
+                  -keyalg RSA -keysize 2048 -validity 10000 \
+                  -storepass "${PASS}" -keypass "${PASS}" \
+                  -dname "CN=Daily Expenses Ledger, O=DailyExpense, C=IN"
+                printf '%s' "${PASS}" > "${REPO_PASS_FILE}"
 
-            if [ ! -f "${REPO_KS}" ] || [ ! -s "${REPO_PASS_FILE}" ]; then
-              echo "Creating permanent signing keystore in signing/dailyexpense.jks (one-time)..."
-              PASS=$(openssl rand -hex 16)
+                git config user.name "github-actions[bot]"
+                git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+                git add signing/dailyexpense.jks signing/keystore-password.txt
+                git commit -m "chore: add permanent signing keystore [skip ci]"
+                if ! (git pull --rebase origin "${GITHUB_REF_NAME}" && git push origin "HEAD:${GITHUB_REF_NAME}"); then
+                  echo "::error::Could not push signing/dailyexpense.jks to the repository. Enable 'Read and write permissions' under Settings -> Actions -> General -> Workflow permissions, then re-run."
+                  exit 1
+                fi
+                echo "Created and saved permanent keystore in signing/dailyexpense.jks." >> "${GITHUB_STEP_SUMMARY}"
+              else
+                echo "Reusing existing permanent keystore from signing/dailyexpense.jks."
+              fi
+
+              PASS=$(tr -d '\r\n' < "${REPO_PASS_FILE}")
               echo "::add-mask::${PASS}"
-              rm -f "${REPO_KS}"
-              keytool -genkeypair -v \
-                -keystore "${REPO_KS}" \
-                -alias dailyexpense \
-                -keyalg RSA -keysize 2048 -validity 10000 \
-                -storepass "${PASS}" -keypass "${PASS}" \
-                -dname "CN=Daily Expenses Ledger, O=DailyExpense, C=IN"
-              printf '%s' "${PASS}" > "${REPO_PASS_FILE}"
-
-              git config user.name "github-actions[bot]"
-              git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-              git add signing/dailyexpense.jks signing/keystore-password.txt
-              git commit -m "chore: add permanent signing keystore [skip ci]"
-              if ! (git pull --rebase origin "${GITHUB_REF_NAME}" && git push origin "HEAD:${GITHUB_REF_NAME}"); then
-                echo "::error::Could not push signing/dailyexpense.jks to the repository. Enable 'Read and write permissions' under Settings -> Actions -> General -> Workflow permissions, then re-run."
+              keytool -list -keystore "${REPO_KS}" -alias dailyexpense -storepass "${PASS}" >/dev/null
+              echo "CI_KEYSTORE_PATH=${REPO_KS}" >> "${GITHUB_ENV}"
+              echo "KEYSTORE_PASSWORD=${PASS}" >> "${GITHUB_ENV}"
+              echo "KEY_ALIAS=dailyexpense" >> "${GITHUB_ENV}"
+              echo "KEY_PASSWORD=${PASS}" >> "${GITHUB_ENV}"
+            elif [ -f "${GITHUB_WORKSPACE}/debug.keystore.base64" ]; then
+              echo "::notice::Public repository without GitHub Secrets: signing consistently with repository debug.keystore.base64 so every APK shares the exact same certificate (matching AI Studio builds). For Play Store / private release signing, add the 4 signing secrets or make the repo private."
+              KEYSTORE_FILE="${{ runner.temp }}/dailyexpense.jks"
+              tr -d '\r\n ' < "${GITHUB_WORKSPACE}/debug.keystore.base64" | base64 --decode > "${KEYSTORE_FILE}"
+              if [ ! -s "${KEYSTORE_FILE}" ]; then
+                echo "::error::Decoded debug.keystore.base64 is empty."
                 exit 1
               fi
-              echo "Created and saved permanent keystore in signing/dailyexpense.jks." >> "${GITHUB_STEP_SUMMARY}"
+              keytool -list -keystore "${KEYSTORE_FILE}" -alias androiddebugkey -storepass android >/dev/null
+              echo "CI_KEYSTORE_PATH=${KEYSTORE_FILE}" >> "${GITHUB_ENV}"
+              echo "KEYSTORE_PASSWORD=android" >> "${GITHUB_ENV}"
+              echo "KEY_ALIAS=androiddebugkey" >> "${GITHUB_ENV}"
+              echo "KEY_PASSWORD=android" >> "${GITHUB_ENV}"
             else
-              echo "Reusing existing permanent keystore from signing/dailyexpense.jks."
+              echo "::error::Repository is PUBLIC, no signing secrets are set, and debug.keystore.base64 is missing. Add KEYSTORE_BASE64, KEYSTORE_PASSWORD, KEY_ALIAS, and KEY_PASSWORD in GitHub Secrets, or make the repo PRIVATE."
+              exit 1
             fi
-
-            PASS=$(tr -d '\r\n' < "${REPO_PASS_FILE}")
-            echo "::add-mask::${PASS}"
-            keytool -list -keystore "${REPO_KS}" -alias dailyexpense -storepass "${PASS}" >/dev/null
-            echo "CI_KEYSTORE_PATH=${REPO_KS}" >> "${GITHUB_ENV}"
-            echo "KEYSTORE_PASSWORD=${PASS}" >> "${GITHUB_ENV}"
-            echo "KEY_ALIAS=dailyexpense" >> "${GITHUB_ENV}"
-            echo "KEY_PASSWORD=${PASS}" >> "${GITHUB_ENV}"
           fi
 
       - name: Compute Monotonic Version Code & Version Name

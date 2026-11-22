@@ -1,6 +1,5 @@
 package com.example.ui.screens.settings
 
-import android.content.Intent
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -22,11 +21,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.DialogProperties
-import androidx.core.content.FileProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.ui.AuthViewModel
 import com.example.ui.DailyExpenseViewModel
@@ -48,8 +45,6 @@ fun ImportExportSettingsSubScreen(
     val s = LocalAppStrings.current
     val coroutineScope = rememberCoroutineScope()
 
-    val dailyBackupsList by (dailyExpenseViewModel?.dailyBackupsList?.collectAsStateWithLifecycle()
-        ?: remember { mutableStateOf(emptyList()) })
     val showPdfConfirmDialog by (dailyExpenseViewModel?.showPdfConfirmDialog?.collectAsStateWithLifecycle()
         ?: remember { mutableStateOf(false) })
     val showPdfProgressDialog by (dailyExpenseViewModel?.showPdfProgressDialog?.collectAsStateWithLifecycle()
@@ -70,10 +65,6 @@ fun ImportExportSettingsSubScreen(
         ?: remember { mutableStateOf(emptyList()) })
 
     var showSampleDownloadChoiceDialog by remember { mutableStateOf(false) }
-
-    LaunchedEffect(Unit) {
-        dailyExpenseViewModel?.refreshDailyBackupsList()
-    }
 
     val createBackupLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.CreateDocument("application/json")
@@ -210,129 +201,7 @@ fun ImportExportSettingsSubScreen(
             }
         }
 
-        // Section 2: Local 2-Day Rolling Daily Backups
-        Card(
-            shape = RoundedCornerShape(20.dp),
-            colors = CardDefaults.cardColors(containerColor = c.card),
-            border = BorderStroke(1.dp, c.border),
-            elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Column(
-                modifier = Modifier.padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                FlowRow(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
-                    Text("LOCAL DAILY BACKUPS", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = c.greenPrimary, letterSpacing = 0.8.sp)
-                    Surface(shape = RoundedCornerShape(4.dp), color = c.greenTint) {
-                        Text("2-DAY ROLLING", fontSize = 8.5.sp, fontWeight = FontWeight.ExtraBold, color = c.greenPrimary, modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp))
-                    }
-                }
-
-                Text(
-                    text = "Creates an on-device daily JSON backup containing ledger data and user profile. Retains the latest 2 days locally.",
-                    fontSize = 11.5.sp,
-                    color = c.textMuted
-                )
-
-                OutlinedButton(
-                    onClick = {
-                        dailyExpenseViewModel?.triggerManualDailyBackup { success ->
-                            Toast.makeText(
-                                context,
-                                if (success) "Local daily backup saved!" else "Failed to create daily backup",
-                                Toast.LENGTH_SHORT
-                            ).show()
-                        }
-                    },
-                    colors = ButtonDefaults.outlinedButtonColors(contentColor = c.greenPrimary),
-                    border = BorderStroke(1.dp, c.greenPrimary),
-                    shape = RoundedCornerShape(10.dp),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .heightIn(min = 48.dp)
-                ) {
-                    Icon(Icons.Default.Backup, contentDescription = null, tint = c.greenPrimary, modifier = Modifier.size(16.dp))
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text("Save Local Daily Backup Now", fontSize = 12.5.sp, fontWeight = FontWeight.Bold, color = c.greenPrimary)
-                }
-
-                if (dailyBackupsList.isNotEmpty()) {
-                    Text("ON-DEVICE SNAPSHOTS (MAX 2 DAYS):", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = c.textMuted)
-                    dailyBackupsList.take(2).forEach { backup ->
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .background(c.cardElevated, RoundedCornerShape(10.dp))
-                                .padding(horizontal = 10.dp, vertical = 6.dp),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                modifier = Modifier.weight(1f)
-                            ) {
-                                Icon(Icons.Default.Description, contentDescription = null, tint = c.greenPrimary, modifier = Modifier.size(16.dp))
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Column {
-                                    Text(backup.dateDisplay, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = c.textPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                    Text(backup.fileSizeStr, fontSize = 10.5.sp, color = c.textMuted)
-                                }
-                            }
-
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                IconButton(
-                                    onClick = {
-                                        authViewModel.suppressAutoLockOnce()
-                                        try {
-                                            val jsonContent = backup.file.readText()
-                                            dailyExpenseViewModel?.restoreFullBackupFromJson(jsonContent, authViewModel) { summary ->
-                                                showRestoreSummaryToast(context, summary)
-                                            }
-                                        } catch (e: Exception) {
-                                            Toast.makeText(context, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
-                                        }
-                                    },
-                                    modifier = Modifier.minimumInteractiveComponentSize()
-                                ) {
-                                    Icon(Icons.Default.Restore, contentDescription = "Restore Local Backup", tint = c.greenPrimary, modifier = Modifier.size(18.dp))
-                                }
-
-                                IconButton(
-                                    onClick = {
-                                        authViewModel.suppressAutoLockOnce()
-                                        try {
-                                            val fileUri = FileProvider.getUriForFile(
-                                                context,
-                                                "${context.packageName}.fileprovider",
-                                                backup.file
-                                            )
-                                            val sendIntent = Intent(Intent.ACTION_SEND).apply {
-                                                putExtra(Intent.EXTRA_STREAM, fileUri)
-                                                type = "application/json"
-                                                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                                            }
-                                            context.startActivity(Intent.createChooser(sendIntent, "Share Backup File"))
-                                        } catch (e: Exception) {
-                                            Toast.makeText(context, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
-                                        }
-                                    },
-                                    modifier = Modifier.minimumInteractiveComponentSize()
-                                ) {
-                                    Icon(Icons.Default.Share, contentDescription = "Share Local Backup", tint = c.blueAccent, modifier = Modifier.size(17.dp))
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Section 3: Customer Statement PDF Import
+        // Section 2: Customer Statement PDF Import
         Card(
             shape = RoundedCornerShape(20.dp),
             colors = CardDefaults.cardColors(containerColor = c.card),

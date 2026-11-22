@@ -461,7 +461,11 @@ class SummaryAndRealtimeSyncTest {
             var moved = false
             vm.updateTransaction(tx2.copy(dateTimestamp = oct10), onSuccess = { moved = true })
             awaitUntil { moved }
-            awaitUntil { vm.summaryChartState.value.overview.entryCount == 1 }
+            awaitUntil {
+                val state = vm.summaryChartState.value
+                state.overview.entryCount == 1 &&
+                    state.points.firstOrNull { it.bucketKey == "2026-10" }?.entryCount == 1
+            }
 
             val afterMove = vm.summaryChartState.value
             assertEquals(1500.0, afterMove.overview.totalPaid, 0.001)

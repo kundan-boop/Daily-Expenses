@@ -1,5 +1,6 @@
 package com.example.data
 
+import androidx.room.ColumnInfo
 import androidx.room.Entity
 import androidx.room.Index
 import androidx.room.PrimaryKey
@@ -9,7 +10,8 @@ import androidx.room.PrimaryKey
     indices = [
         Index("monthYear"),
         Index("dateTimestamp"),
-        Index("category")
+        Index("category"),
+        Index("synced")
     ]
 )
 data class MonthlyExpenseEntity(
@@ -21,7 +23,9 @@ data class MonthlyExpenseEntity(
     val amount: Double,
     val dateTimestamp: Long = System.currentTimeMillis(),
     val notes: String = "",
-    val attachmentPath: String? = null
+    val attachmentPath: String? = null,
+    @ColumnInfo(defaultValue = "1")
+    val synced: Boolean = true
 )
 
 @Entity(tableName = "categories")

@@ -29,6 +29,8 @@ object AppPreferencesManager {
     private const val KEY_THEME_MODE = "theme_mode"
     private const val KEY_LANGUAGE = "app_language"
     private const val KEY_NOTIFICATIONS_ENABLED = "notifications_enabled"
+    private const val KEY_DUE_REMINDER_HOUR = "due_reminder_hour"
+    private const val KEY_DUE_REMINDER_MINUTE = "due_reminder_minute"
     private const val KEY_DRIVE_AUTO_BACKUP = "drive_auto_backup_enabled"
     private const val KEY_FIREBASE_AUTO_BACKUP = "firebase_auto_backup_enabled"
     private const val KEY_LAST_FIREBASE_BACKUP_TIME = "last_firebase_backup_time"
@@ -45,6 +47,13 @@ object AppPreferencesManager {
 
     private val _notificationsEnabledFlow = MutableStateFlow(true)
     val notificationsEnabledFlow: StateFlow<Boolean> = _notificationsEnabledFlow.asStateFlow()
+    val dueReminderEnabledFlow: StateFlow<Boolean> = _notificationsEnabledFlow.asStateFlow()
+
+    private val _dueReminderHourFlow = MutableStateFlow(9)
+    val dueReminderHourFlow: StateFlow<Int> = _dueReminderHourFlow.asStateFlow()
+
+    private val _dueReminderMinuteFlow = MutableStateFlow(0)
+    val dueReminderMinuteFlow: StateFlow<Int> = _dueReminderMinuteFlow.asStateFlow()
 
     private val _driveAutoBackupEnabledFlow = MutableStateFlow(true)
     val driveAutoBackupEnabledFlow: StateFlow<Boolean> = _driveAutoBackupEnabledFlow.asStateFlow()
@@ -62,6 +71,8 @@ object AppPreferencesManager {
             .getOrDefault(ThemeMode.SYSTEM)
         _languageFlow.value = prefs.getString(KEY_LANGUAGE, "English") ?: "English"
         _notificationsEnabledFlow.value = prefs.getBoolean(KEY_NOTIFICATIONS_ENABLED, true)
+        _dueReminderHourFlow.value = prefs.getInt(KEY_DUE_REMINDER_HOUR, 9).coerceIn(0, 23)
+        _dueReminderMinuteFlow.value = prefs.getInt(KEY_DUE_REMINDER_MINUTE, 0).coerceIn(0, 59)
         _driveAutoBackupEnabledFlow.value = prefs.getBoolean(KEY_DRIVE_AUTO_BACKUP, true)
         _firebaseAutoBackupEnabledFlow.value = prefs.getBoolean(KEY_FIREBASE_AUTO_BACKUP, true)
         val authUser = com.example.auth.GoogleAuthHelper.getCurrentAccountInfo()
@@ -84,12 +95,55 @@ object AppPreferencesManager {
         _languageFlow.value = language
     }
 
+    fun isDueReminderEnabled(context: Context): Boolean {
+        return context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getBoolean(KEY_NOTIFICATIONS_ENABLED, true)
+    }
+
+    fun getDueReminderHour(context: Context): Int {
+        return context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getInt(KEY_DUE_REMINDER_HOUR, 9).coerceIn(0, 23)
+    }
+
+    fun getDueReminderMinute(context: Context): Int {
+        return context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getInt(KEY_DUE_REMINDER_MINUTE, 0).coerceIn(0, 59)
+    }
+
     fun setNotificationsEnabled(context: Context, enabled: Boolean) {
         context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
             .putBoolean(KEY_NOTIFICATIONS_ENABLED, enabled)
             .apply()
         _notificationsEnabledFlow.value = enabled
+        if (enabled) {
+            DueReminderHelper.scheduleDailyDueReminder(
+                context = context,
+                hour = _dueReminderHourFlow.value,
+                minute = _dueReminderMinuteFlow.value
+            )
+        } else {
+            DueReminderHelper.cancelDueReminder(context)
+        }
+    }
+
+    fun setDueReminderEnabled(context: Context, enabled: Boolean) {
+        setNotificationsEnabled(context, enabled)
+    }
+
+    fun setDueReminderTime(context: Context, hour: Int, minute: Int) {
+        val safeHour = hour.coerceIn(0, 23)
+        val safeMinute = minute.coerceIn(0, 59)
+        context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putInt(KEY_DUE_REMINDER_HOUR, safeHour)
+            .putInt(KEY_DUE_REMINDER_MINUTE, safeMinute)
+            .apply()
+        _dueReminderHourFlow.value = safeHour
+        _dueReminderMinuteFlow.value = safeMinute
+        if (isDueReminderEnabled(context)) {
+            DueReminderHelper.scheduleDailyDueReminder(context, safeHour, safeMinute)
+        }
     }
 
     fun isDriveAutoBackupEnabled(context: Context): Boolean {
